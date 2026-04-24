@@ -30,7 +30,10 @@ jobs:
       - name: Install Capacitor Android
         run: npm install @capacitor/android @capacitor/cli
 
-      - name: Build web app
+      - name: Build web app with API keys
+        env:
+          VITE_ANTHROPIC_KEY: ${{ secrets.VITE_ANTHROPIC_KEY }}
+          VITE_FAL_KEY: ${{ secrets.VITE_FAL_KEY }}
         run: npm run build
 
       - name: Add Android platform
