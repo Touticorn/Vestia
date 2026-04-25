@@ -243,14 +243,14 @@ Reply ONLY with valid JSON (no markdown, no backticks):
 
       const parts = [
         ...(userPhoto ? [{ inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } }] : []),
-        ...wardrobe.slice(0, 6).map(i => ({ inline_data: { mime_type: i.mediaType, data: i.base64 } })),
+        ...wardrobe.slice(0, 4).map(i => ({ inline_data: { mime_type: i.mediaType, data: i.base64 } })),
         { text: promptText },
       ];
       const reqBody = {
         contents: [{ role: "user", parts }],
-        generationConfig: { temperature: 0.9, maxOutputTokens: 1200, responseMimeType: "application/json" },
+        generationConfig: { temperature: 0.9, maxOutputTokens: 2000, responseMimeType: "application/json" },
       };
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
 
       let data;
       if (window.Capacitor?.isNativePlatform?.()) {
@@ -322,9 +322,9 @@ Reply ONLY with JSON:
 {"days":[{"day":"MON","outfit":{"top":"...","bottom":"...","shoes":"...","outerwear":null},"mood":"word","note":"one elegant sentence"}],"philosophy":"one sentence"}`;
       const reqBody = {
         contents: [{ role: "user", parts: [{ text: promptText }] }],
-        generationConfig: { temperature: 0.9, maxOutputTokens: 1500, responseMimeType: "application/json" },
+        generationConfig: { temperature: 0.9, maxOutputTokens: 2500, responseMimeType: "application/json" },
       };
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
       let data;
       if (isNative) {
         const resp = await window.Capacitor.Plugins.CapacitorHttp.post({
