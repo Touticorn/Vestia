@@ -1,9 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { fal } from "@fal-ai/client";
 
 const GEMINI_KEY = import.meta.env.VITE_GEMINI_KEY || "";
-const FAL_KEY_VAL = import.meta.env.VITE_FAL_KEY || "";
-fal.config({ credentials: FAL_KEY_VAL });
 
 // ─── CONSTANTS ──────────────────────────────────────────────────
 const WMO_LABEL = {0:"Clear",1:"Mainly Clear",2:"Partly Cloudy",3:"Overcast",45:"Foggy",48:"Icy Fog",51:"Light Drizzle",53:"Drizzle",55:"Heavy Drizzle",61:"Light Rain",63:"Rain",65:"Heavy Rain",71:"Light Snow",73:"Snow",75:"Heavy Snow",77:"Snow Grains",80:"Showers",81:"Showers",82:"Heavy Showers",85:"Snow Showers",86:"Snow Showers",95:"Thunder",96:"Thunder",99:"Thunder"};
@@ -243,14 +240,14 @@ Reply ONLY with valid JSON (no markdown, no backticks):
 
       const parts = [
         ...(userPhoto ? [{ inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } }] : []),
-        ...wardrobe.slice(0, 4).map(i => ({ inline_data: { mime_type: i.mediaType, data: i.base64 } })),
+        ...wardrobe.slice(0, 6).map(i => ({ inline_data: { mime_type: i.mediaType, data: i.base64 } })),
         { text: promptText },
       ];
       const reqBody = {
         contents: [{ role: "user", parts }],
-        generationConfig: { temperature: 0.9, maxOutputTokens: 2000, responseMimeType: "application/json" },
+        generationConfig: { temperature: 0.9, maxOutputTokens: 1200, responseMimeType: "application/json" },
       };
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
 
       let data;
       if (window.Capacitor?.isNativePlatform?.()) {
@@ -322,9 +319,9 @@ Reply ONLY with JSON:
 {"days":[{"day":"MON","outfit":{"top":"...","bottom":"...","shoes":"...","outerwear":null},"mood":"word","note":"one elegant sentence"}],"philosophy":"one sentence"}`;
       const reqBody = {
         contents: [{ role: "user", parts: [{ text: promptText }] }],
-        generationConfig: { temperature: 0.9, maxOutputTokens: 2500, responseMimeType: "application/json" },
+        generationConfig: { temperature: 0.9, maxOutputTokens: 1500, responseMimeType: "application/json" },
       };
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
       let data;
       if (isNative) {
         const resp = await window.Capacitor.Plugins.CapacitorHttp.post({
@@ -351,45 +348,47 @@ Reply ONLY with JSON:
   };
 
   // ─── Video generation ───────────────────────────────────────────
-  const generateVideo = async () => {
-    if (!suggestion?.videoPrompt) return;
+  const generatePhoto = async () => {
+    if (!suggestion?.outfit) return;
     if (!userPhoto) return showToast("Add profile photo first", "error");
-
-    setSdLoading(true);
-    setSdVideo(null);
-    setSdError(null);
-    setSdStatus("Submitting to Seedance...");
-    haptic(15);
-
+    setSdLoading(true); setSdVideo(null); setSdError(null);
+    setSdStatus("Generating image..."); haptic(15);
     try {
-      const result = await fal.subscribe("fal-ai/bytedance/seedance/v1/lite/image-to-video", {
-        input: {
-          prompt: suggestion.videoPrompt,
-          image_url: userPhoto.url,
-          duration: "5",
-          resolution: "720p",
-          aspect_ratio: "9:16",
-        },
-        logs: true,
-        onQueueUpdate: (update) => {
-          if (update.status === "IN_QUEUE") setSdStatus("In queue...");
-          else if (update.status === "IN_PROGRESS") {
-            const lastLog = update.logs?.[update.logs.length - 1]?.message || "Generating...";
-            setSdStatus(lastLog.slice(0, 50));
-          }
-        },
-      });
-
-      const videoUrl = result.data?.video?.url;
-      if (!videoUrl) throw new Error("No video URL");
-      setSdVideo(videoUrl);
-      setSdStatus("");
-      showToast("Video ready", "success");
+      const o = suggestion.outfit || {};
+      const pieces = Object.values(o).filter(Boolean).join(", ");
+      const promptText = `High-fashion editorial photo of person from reference wearing: ${pieces}. Full body, soft lighting, minimal background, magazine quality. Keep exact face and identity from reference.`;
+      const reqBody = {
+        contents: [{ role: "user", parts: [
+          { inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } },
+          { text: promptText },
+        ]}],
+        generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+      };
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${GEMINI_KEY}`;
+      let data;
+      if (window.Capacitor?.isNativePlatform?.()) {
+        const resp = await window.Capacitor.Plugins.CapacitorHttp.post({
+          url, headers: { "Content-Type": "application/json" }, data: reqBody,
+        });
+        if (resp.status >= 400) throw new Error(resp.data?.error?.message || `API error ${resp.status}`);
+        data = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+      } else {
+        const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(reqBody) });
+        if (!res.ok) throw new Error(`API error ${res.status}`);
+        data = await res.json();
+      }
+      const parts = data.candidates?.[0]?.content?.parts || [];
+      const imagePart = parts.find(p => p.inlineData || p.inline_data);
+      const imgData = imagePart?.inlineData?.data || imagePart?.inline_data?.data;
+      const mime = imagePart?.inlineData?.mimeType || imagePart?.inline_data?.mime_type || "image/png";
+      if (!imgData) throw new Error("No image returned");
+      setSdVideo(`data:${mime};base64,${imgData}`);
+      setSdStatus(""); showToast("Photo ready", "success");
       haptic([20,50,20,50,20]);
     } catch (e) {
       console.error(e);
-      setSdError(e.message || "Video generation failed");
-      showToast("Video failed", "error");
+      setSdError(e.message || "Photo generation failed");
+      showToast("Photo failed", "error");
     }
     setSdLoading(false);
   };
@@ -641,24 +640,24 @@ Reply ONLY with JSON:
                   <div className="cinema">
                     <div className="cinema-eyebrow">
                       <span className="cinema-label">Cinema</span>
-                      <span className="cinema-attribution">Seedance × ByteDance</span>
+                      <span className="cinema-attribution">Gemini × Google</span>
                     </div>
                     <h3 className="cinema-title">A moving portrait,<br/><span className="type-italic">in five seconds.</span></h3>
                     <p className="cinema-body">Generate a cinematic vertical video of you wearing this exact composition. Renders in 30–90 seconds.</p>
-                    <button className="btn btn-block" onClick={generateVideo} disabled={sdLoading || !userPhoto}>
+                    <button className="btn btn-block" onClick={generatePhoto} disabled={sdLoading || !userPhoto}>
                       {sdLoading ? (
                         <>
                           <span className="loader"><span className="loader-dot"/><span className="loader-dot"/><span className="loader-dot"/></span>
                           <span>{sdStatus || "Rendering"}</span>
                         </>
-                      ) : !userPhoto ? <span>Add Profile Photo First</span> : <span>Generate Video</span>}
+                      ) : !userPhoto ? <span>Add Profile Photo First</span> : <span>Generate Photo</span>}
                     </button>
                     {sdVideo && (
                       <div style={{marginTop: 16, border: "0.5px solid var(--ochre-deep)"}}>
-                        <video src={sdVideo} controls autoPlay loop muted playsInline style={{width: "100%", display: "block"}}/>
-                        <a href={sdVideo} download="vestia-look.mp4" target="_blank" rel="noopener"
+                        <img src={sdVideo} alt="Generated outfit" style={{width: "100%", display: "block"}}/>
+                        <a href={sdVideo} download="vestia-look.png" target="_blank" rel="noopener"
                           style={{display: "block", padding: "12px", textAlign: "center", fontFamily: "var(--sans)", fontSize: 9, letterSpacing: ".22em", textTransform: "uppercase", color: "var(--ochre-pale)", background: "var(--ink-soft)", textDecoration: "none", borderTop: "0.5px solid var(--graphite)"}}>
-                          Download Video
+                          Download Photo
                         </a>
                       </div>
                     )}
@@ -934,7 +933,7 @@ Reply ONLY with JSON:
                 <div className="divider"><span className="divider-label">Powered By</span></div>
                 <div className="type-body" style={{color:"var(--graphite)",fontSize:14,lineHeight:1.7}}>
                   <div style={{marginBottom:6}}><span className="numeral">i.</span> Anthropic Claude — Style intelligence</div>
-                  <div style={{marginBottom:6}}><span className="numeral">ii.</span> ByteDance Seedance — Cinematic video</div>
+                  <div style={{marginBottom:6}}><span className="numeral">ii.</span> Gemini Image — AI photo generation</div>
                   <div><span className="numeral">iii.</span> Open-Meteo — Real-time weather</div>
                 </div>
               </div>
