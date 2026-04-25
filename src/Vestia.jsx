@@ -216,36 +216,21 @@ export default function Vestia() {
     try {
       const desc = wardrobe.map((i, x) => `[${x+1}] ${i.categoryLabel}: "${i.name}" (worn ${i.wearCount}×, last:${i.lastWorn || "never"})`).join("\n");
       const w = weather;
-      const promptText = `World-class personal stylist for an editorial fashion app.
-
-LIVE WEATHER: ${w?.label || "Clear"}, ${w?.temp || 20}°C, feels ${w?.feel || 19}°C, humidity ${w?.humidity || 50}%, wind ${w?.wind || 10}km/h.
-
-WARDROBE:
+      const promptText = `Editorial stylist. Weather: ${w?.label||"clear"}, ${w?.temp||20}°C.
+Wardrobe:
 ${desc}
 
-${userPhoto ? "First image = user's photo. Remaining = wardrobe items." : "Images = wardrobe items."}
-
-Reply ONLY with valid JSON (no markdown, no backticks):
-{
-  "outfit": {"top":"name","bottom":"name","shoes":"name","outerwear":null,"accessories":null},
-  "mood": "one evocative word — like 'Composed' or 'Intimate'",
-  "reasoning": "2 sentences in fashion editor voice — restrained, observational",
-  "styleScore": 88,
-  "weatherScore": 94,
-  "tips": ["tip 1", "tip 2"],
-  "occasion": "Editorial / Work / Soirée / Leisure",
-  "colorStory": "palette harmony in 1 sentence",
-  "videoPrompt": "Cinematic fashion editorial. Subject wearing [describe each piece in detail]. Slow camera dolly, soft natural light, minimal background, shallow depth of field, 5 seconds."
-}`;
+JSON only:
+{"outfit":{"top":"","bottom":"","shoes":"","outerwear":null,"accessories":null},"mood":"one word","reasoning":"2 short sentences","styleScore":88,"weatherScore":94,"tips":["tip","tip"],"occasion":"Work/Casual/Evening","colorStory":"1 sentence","videoPrompt":"Cinematic fashion video, person wearing outfit, soft light, 5s"}`;
 
       const parts = [
         ...(userPhoto ? [{ inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } }] : []),
-        ...wardrobe.slice(0, 6).map(i => ({ inline_data: { mime_type: i.mediaType, data: i.base64 } })),
+        ...wardrobe.slice(0, 4).map(i => ({ inline_data: { mime_type: i.mediaType, data: i.base64 } })),
         { text: promptText },
       ];
       const reqBody = {
         contents: [{ role: "user", parts }],
-        generationConfig: { temperature: 0.9, maxOutputTokens: 1200, responseMimeType: "application/json" },
+        generationConfig: { temperature: 0.9, maxOutputTokens: 2000, responseMimeType: "application/json" },
       };
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
 
@@ -273,7 +258,15 @@ Reply ONLY with valid JSON (no markdown, no backticks):
         data = await res.json();
       }
       const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
-      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      let cleanText = text.replace(/```json|```/g, "").trim();
+      // Try to fix truncated JSON by closing brackets
+      if (!cleanText.endsWith("}")) {
+        const lastBrace = cleanText.lastIndexOf("}");
+        if (lastBrace > 0) cleanText = cleanText.substring(0, lastBrace + 1);
+      }
+      let parsed;
+      try { parsed = JSON.parse(cleanText); }
+      catch (parseErr) { throw new Error("AI response was incomplete. Try again."); }
       setSuggestion(parsed);
 
       const entry = { date: new Date().toISOString(), outfit: parsed.outfit, mood: parsed.mood, weather: { temp: w?.temp, label: w?.label } };
@@ -307,19 +300,16 @@ Reply ONLY with valid JSON (no markdown, no backticks):
       const forecast = weather?.week?.map(d => `${d.day}: ${d.label}, ${d.high}°/${d.low}°C`).join("\n") || "Mild week";
 
       const isNative = window.Capacitor?.isNativePlatform?.();
-      const promptText = `Editorial personal stylist. Plan 7 days of outfits. Each item used max twice.
-
-FORECAST:
+      const promptText = `Stylist. Plan 7 outfits. Each item max 2x.
+Forecast:
 ${forecast}
-
-WARDROBE:
+Wardrobe:
 ${desc}
-
-Reply ONLY with JSON:
-{"days":[{"day":"MON","outfit":{"top":"...","bottom":"...","shoes":"...","outerwear":null},"mood":"word","note":"one elegant sentence"}],"philosophy":"one sentence"}`;
+JSON only:
+{"days":[{"day":"MON","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"word","note":"short"}],"philosophy":"1 sentence"}`;
       const reqBody = {
         contents: [{ role: "user", parts: [{ text: promptText }] }],
-        generationConfig: { temperature: 0.9, maxOutputTokens: 1500, responseMimeType: "application/json" },
+        generationConfig: { temperature: 0.9, maxOutputTokens: 2500, responseMimeType: "application/json" },
       };
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
       let data;
@@ -341,7 +331,13 @@ Reply ONLY with JSON:
         data = await res.json();
       }
       const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
-      setWeekPlan(JSON.parse(text.replace(/```json|```/g, "").trim()));
+      let cleanText = text.replace(/```json|```/g, "").trim();
+      if (!cleanText.endsWith("}")) {
+        const lastBrace = cleanText.lastIndexOf("}");
+        if (lastBrace > 0) cleanText = cleanText.substring(0, lastBrace + 1);
+      }
+      try { setWeekPlan(JSON.parse(cleanText)); }
+      catch (parseErr) { throw new Error("AI response was incomplete. Try again."); }
       haptic([10,30,10]);
     } catch(e) { console.error(e); showToast("Week plan failed", "error"); }
     setLoadingWeek(false);
@@ -350,40 +346,67 @@ Reply ONLY with JSON:
   // ─── Video generation ───────────────────────────────────────────
   const generatePhoto = async () => {
     if (!suggestion?.outfit) return;
-    if (!userPhoto) return showToast("Add profile photo first", "error");
     setSdLoading(true); setSdVideo(null); setSdError(null);
-    setSdStatus("Generating image..."); haptic(15);
-    try {
-      const o = suggestion.outfit || {};
-      const pieces = Object.values(o).filter(Boolean).join(", ");
-      const promptText = `High-fashion editorial photo of person from reference wearing: ${pieces}. Full body, soft lighting, minimal background, magazine quality. Keep exact face and identity from reference.`;
-      const reqBody = {
-        contents: [{ role: "user", parts: [
-          { inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } },
-          { text: promptText },
-        ]}],
-        generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
-      };
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${GEMINI_KEY}`;
-      let data;
-      if (window.Capacitor?.isNativePlatform?.()) {
-        const resp = await window.Capacitor.Plugins.CapacitorHttp.post({
-          url, headers: { "Content-Type": "application/json" }, data: reqBody,
-        });
-        if (resp.status >= 400) throw new Error(resp.data?.error?.message || `API error ${resp.status}`);
-        data = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
-      } else {
-        const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(reqBody) });
-        if (!res.ok) throw new Error(`API error ${res.status}`);
-        data = await res.json();
+    setSdStatus("Generating photo..."); haptic(15);
+
+    const o = suggestion.outfit || {};
+    const pieces = Object.values(o).filter(Boolean).join(", ");
+    const mood = suggestion.mood || "elegant";
+    const occasion = suggestion.occasion || "editorial";
+    const colorStory = suggestion.colorStory || "";
+
+    // Try Gemini first (with face) - works while you have free quota
+    if (userPhoto && GEMINI_KEY) {
+      try {
+        setSdStatus("Trying with your face...");
+        const promptText = `High-fashion editorial photo of person from reference wearing: ${pieces}. Full body, soft lighting, minimal background, magazine quality. Keep exact face and identity from reference.`;
+        const reqBody = {
+          contents: [{ role: "user", parts: [
+            { inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } },
+            { text: promptText },
+          ]}],
+          generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+        };
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${GEMINI_KEY}`;
+        let data;
+        if (window.Capacitor?.isNativePlatform?.()) {
+          const resp = await window.Capacitor.Plugins.CapacitorHttp.post({
+            url, headers: { "Content-Type": "application/json" }, data: reqBody,
+          });
+          if (resp.status >= 400) throw new Error(`Gemini quota exceeded`);
+          data = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+        } else {
+          const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(reqBody) });
+          if (!res.ok) throw new Error(`Gemini quota exceeded`);
+          data = await res.json();
+        }
+        const parts = data.candidates?.[0]?.content?.parts || [];
+        const imagePart = parts.find(p => p.inlineData || p.inline_data);
+        const imgData = imagePart?.inlineData?.data || imagePart?.inline_data?.data;
+        const mime = imagePart?.inlineData?.mimeType || imagePart?.inline_data?.mime_type || "image/png";
+        if (imgData) {
+          setSdVideo(`data:${mime};base64,${imgData}`);
+          setSdStatus("");
+          showToast("Photo with your face ready", "success");
+          haptic([20,50,20,50,20]);
+          setSdLoading(false);
+          return;
+        }
+      } catch (e) {
+        console.log("Gemini failed, falling back:", e.message);
       }
-      const parts = data.candidates?.[0]?.content?.parts || [];
-      const imagePart = parts.find(p => p.inlineData || p.inline_data);
-      const imgData = imagePart?.inlineData?.data || imagePart?.inline_data?.data;
-      const mime = imagePart?.inlineData?.mimeType || imagePart?.inline_data?.mime_type || "image/png";
-      if (!imgData) throw new Error("No image returned");
-      setSdVideo(`data:${mime};base64,${imgData}`);
-      setSdStatus(""); showToast("Photo ready", "success");
+    }
+
+    // Fallback: Pollinations.ai (free unlimited, no face preservation)
+    try {
+      setSdStatus("Generating fashion photo...");
+      const promptText = `High-fashion editorial photograph, full body shot of a stylish person wearing ${pieces}. ${mood} ${occasion} aesthetic. ${colorStory} Professional fashion photography, soft natural lighting, minimal background, magazine quality, sharp focus, 8k`;
+      const seed = Math.floor(Math.random() * 1000000);
+      const encodedPrompt = encodeURIComponent(promptText);
+      const url = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=768&height=1024&seed=${seed}&nologo=true&model=flux`;
+      setSdVideo(url);
+      setSdStatus("");
+      showToast("Photo ready (no face match)", "success");
       haptic([20,50,20,50,20]);
     } catch (e) {
       console.error(e);
@@ -560,16 +583,29 @@ Reply ONLY with JSON:
               </div>
             )}
 
-            <div className="section">
-              <button className="btn btn-block btn-dark" onClick={getSuggestion} disabled={loading}>
-                {loading ? (
-                  <>
-                    <span className="loader"><span className="loader-dot"/><span className="loader-dot"/><span className="loader-dot"/></span>
-                    <span>Composing</span>
-                  </>
-                ) : <span>Compose Today's Look</span>}
-              </button>
-            </div>
+            {wardrobe.length < 2 ? (
+              <div className="section">
+                <div className="empty">
+                  <div className="empty-mark">◇</div>
+                  <h3 className="empty-title">Begin with the wardrobe.</h3>
+                  <p className="empty-body">Add at least two pieces — Vestia composes from what you have.</p>
+                  <button className="btn" onClick={() => setTab("wardrobe")}>
+                    <span>Build Wardrobe</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="section">
+                <button className="btn btn-block btn-dark" onClick={getSuggestion} disabled={loading}>
+                  {loading ? (
+                    <>
+                      <span className="loader"><span className="loader-dot"/><span className="loader-dot"/><span className="loader-dot"/></span>
+                      <span>Composing</span>
+                    </>
+                  ) : <span>Compose Today's Look</span>}
+                </button>
+              </div>
+            )}
 
             {suggestion && !suggestion.error && (
               <div className="fade-up">
@@ -640,15 +676,15 @@ Reply ONLY with JSON:
                   <div className="cinema">
                     <div className="cinema-eyebrow">
                       <span className="cinema-label">Cinema</span>
-                      <span className="cinema-attribution">Gemini × Google</span>
+                      <span className="cinema-attribution">Pollinations × FLUX</span>
                     </div>
-                    <h3 className="cinema-title">A moving portrait,<br/><span className="type-italic">in five seconds.</span></h3>
-                    <p className="cinema-body">Generate a cinematic vertical video of you wearing this exact composition. Renders in 30–90 seconds.</p>
+                    <h3 className="cinema-title">A portrait,<br/><span className="type-italic">in your outfit.</span></h3>
+                    <p className="cinema-body">AI photo of this look. Tries with your face first (Gemini), falls back to fashion photo if quota exceeded.</p>
                     <button className="btn btn-block" onClick={generatePhoto} disabled={sdLoading || !userPhoto}>
                       {sdLoading ? (
                         <>
                           <span className="loader"><span className="loader-dot"/><span className="loader-dot"/><span className="loader-dot"/></span>
-                          <span>{sdStatus || "Rendering"}</span>
+                          <span>{sdStatus || "Generating"}</span>
                         </>
                       ) : !userPhoto ? <span>Add Profile Photo First</span> : <span>Generate Photo</span>}
                     </button>
@@ -675,18 +711,7 @@ Reply ONLY with JSON:
               </div>
             )}
 
-            {!suggestion && !loading && wardrobe.length < 2 && (
-              <div className="section">
-                <div className="empty">
-                  <div className="empty-mark">◇</div>
-                  <h3 className="empty-title">Begin with the wardrobe.</h3>
-                  <p className="empty-body">Add at least two pieces — Vestia composes from what you have.</p>
-                  <button className="btn" onClick={() => setTab("wardrobe")}>
-                    <span>Build Wardrobe</span>
-                  </button>
-                </div>
-              </div>
-            )}
+
           </div>
         )}
 
@@ -933,7 +958,7 @@ Reply ONLY with JSON:
                 <div className="divider"><span className="divider-label">Powered By</span></div>
                 <div className="type-body" style={{color:"var(--graphite)",fontSize:14,lineHeight:1.7}}>
                   <div style={{marginBottom:6}}><span className="numeral">i.</span> Anthropic Claude — Style intelligence</div>
-                  <div style={{marginBottom:6}}><span className="numeral">ii.</span> Gemini Image — AI photo generation</div>
+                  <div style={{marginBottom:6}}><span className="numeral">ii.</span> Pollinations FLUX — AI photo generation</div>
                   <div><span className="numeral">iii.</span> Open-Meteo — Real-time weather</div>
                 </div>
               </div>
