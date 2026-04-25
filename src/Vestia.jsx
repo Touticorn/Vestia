@@ -300,9 +300,7 @@ export default function Vestia() {
           dateAdded: new Date().toISOString(),
         };
 
-        const updated = [...wardrobe, newItem];
-        setWardrobe(updated);
-        await dbSet("wardrobe", updated);
+        setWardrobe(prev => { const updated = [...prev, newItem]; dbSet("wardrobe", updated); return updated; });
         toast(`Added: ${newItem.name} (${validCategory})`);
         haptic(20);
       }
