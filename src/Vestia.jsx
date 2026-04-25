@@ -70,6 +70,8 @@ export default function Vestia() {
 
   const [suggestion, setSuggestion] = useState(null);
   const [weekPlan, setWeekPlan] = useState(null);
+  const [dayPhotos, setDayPhotos] = useState({});
+  const [dayPhotoLoading, setDayPhotoLoading] = useState({});
   const [loading, setLoading] = useState(false);
   const [loadingWeek, setLoadingWeek] = useState(false);
 
@@ -621,13 +623,26 @@ JSON only:
                     <span className="divider-label">The Composition</span>
                   </div>
                   <div>
-                    {Object.entries(suggestion.outfit||{}).filter(([,v])=>v).map(([part, val], i) => (
-                      <div key={part} className="composition-row">
-                        <span className="composition-num">{String(i+1).padStart(2,'0')}</span>
-                        <span className="composition-label">{part}</span>
-                        <span className="composition-name">{val}</span>
-                      </div>
-                    ))}
+                    {Object.entries(suggestion.outfit||{}).filter(([,v])=>v).map(([part, val], i) => {
+                      const partToCat = { top: "tops", bottom: "bottoms", shoes: "shoes", outerwear: "outerwear", accessories: "accessories" };
+                      const catKey = partToCat[part];
+                      const matches = wardrobe.filter(w => w.category === catKey);
+                      const thumb = matches[0];
+                      return (
+                        <div key={part} style={{display:"flex",alignItems:"center",gap:14,padding:"14px 0",borderBottom:"0.5px solid var(--ash)"}}>
+                          <span className="composition-num" style={{minWidth:28}}>{String(i+1).padStart(2,'0')}</span>
+                          {thumb ? (
+                            <img src={thumb.url} alt={part} style={{width:48,height:60,objectFit:"cover",border:"0.5px solid var(--ash)",flexShrink:0}}/>
+                          ) : (
+                            <div style={{width:48,height:60,border:"0.5px solid var(--ash)",flexShrink:0}}/>
+                          )}
+                          <div style={{flex:1,minWidth:0}}>
+                            <div className="composition-label" style={{marginBottom:4}}>{part}</div>
+                            <div className="composition-name" style={{fontSize:13}}>{val}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -817,7 +832,20 @@ JSON only:
                       <div className="day-name">{d.day}</div>
                       <div className="day-mood">{d.mood}</div>
                     </div>
-                    <div className="day-pieces">
+                    <div style={{display:"flex",gap:8,marginTop:10,marginBottom:10,flexWrap:"wrap"}}>
+                      {Object.entries(d.outfit || {}).filter(([,v])=>v).map(([part, val], j) => {
+                        const partToCat = { top: "tops", bottom: "bottoms", shoes: "shoes", outerwear: "outerwear", accessories: "accessories" };
+                        const catKey = partToCat[part];
+                        const matches = wardrobe.filter(w => w.category === catKey);
+                        const thumb = matches[0];
+                        return thumb ? (
+                          <img key={j} src={thumb.url} alt={part} title={val} style={{width:44,height:54,objectFit:"cover",border:"0.5px solid var(--ash)"}}/>
+                        ) : (
+                          <div key={j} style={{width:44,height:54,border:"0.5px solid var(--ash)"}}/>
+                        );
+                      })}
+                    </div>
+                    <div className="day-pieces" style={{fontSize:11}}>
                       {Object.values(d.outfit || {}).filter(Boolean).map((v, j, arr) => (
                         <span key={j}>
                           {v}{j < arr.length - 1 && <span className="sep">·</span>}
@@ -825,6 +853,17 @@ JSON only:
                       ))}
                     </div>
                     {d.note && <div className="day-note">— {d.note}</div>}
+                    {dayPhotos[i] && (
+                      <div style={{marginTop:14, border:"0.5px solid var(--graphite)"}}>
+                        <img src={dayPhotos[i]} alt={`${d.day} outfit`} style={{width:"100%", display:"block"}}/>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => generateDayPhoto(i, d)}
+                      disabled={dayPhotoLoading[i]}
+                      style={{marginTop:14, width:"100%", padding:"10px 14px", background:"transparent", border:"0.5px solid var(--ochre-deep)", color:"var(--ochre-deep)", fontFamily:"var(--sans)", fontSize:9, letterSpacing:".22em", textTransform:"uppercase"}}>
+                      {dayPhotoLoading[i] ? "Generating..." : (dayPhotos[i] ? "Regenerate Photo" : "Generate Photo")}
+                    </button>
                   </div>
                 </div>
               ))}
