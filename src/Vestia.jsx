@@ -1,547 +1,985 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { fal } from "@fal-ai/client";
 
-const CATS = ["Outerwear", "Tops", "Bottoms", "Footwear", "Accessories"];
-const TODAY_ISSUE = new Date().toLocaleDateString("en", {
-  weekday: "long", month: "long", day: "numeric",
+const GEMINI_KEY = import.meta.env.VITE_GEMINI_KEY || "";
+const FAL_KEY_VAL = import.meta.env.VITE_FAL_KEY || "";
+fal.config({ credentials: FAL_KEY_VAL });
+
+// ─── CONSTANTS ──────────────────────────────────────────────────
+const WMO_LABEL = {0:"Clear",1:"Mainly Clear",2:"Partly Cloudy",3:"Overcast",45:"Foggy",48:"Icy Fog",51:"Light Drizzle",53:"Drizzle",55:"Heavy Drizzle",61:"Light Rain",63:"Rain",65:"Heavy Rain",71:"Light Snow",73:"Snow",75:"Heavy Snow",77:"Snow Grains",80:"Showers",81:"Showers",82:"Heavy Showers",85:"Snow Showers",86:"Snow Showers",95:"Thunder",96:"Thunder",99:"Thunder"};
+const CATS = ["TOPS","BOTTOMS","SHOES","OUTERWEAR","ACCESSORIES"];
+const CAT_KEY = {TOPS:"tops",BOTTOMS:"bottoms",SHOES:"shoes",OUTERWEAR:"outerwear",ACCESSORIES:"accessories"};
+const TODAY_ISSUE = new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"long",year:"numeric"}).toUpperCase();
+
+// ─── INDEXEDDB ──────────────────────────────────────────────────
+const DB_NAME = "vestia_db";
+const DB_VERSION = 1;
+const openDB = () => new Promise((res, rej) => {
+  const req = indexedDB.open(DB_NAME, DB_VERSION);
+  req.onerror = () => rej(req.error);
+  req.onsuccess = () => res(req.result);
+  req.onupgradeneeded = (e) => {
+    const db = e.target.result;
+    if (!db.objectStoreNames.contains("photos")) db.createObjectStore("photos", { keyPath: "id" });
+    if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "key" });
+  };
 });
+const dbGet = async (store, key) => { const db = await openDB(); return new Promise((r, rj) => { const t = db.transaction(store,"readonly").objectStore(store).get(key); t.onsuccess = () => r(t.result); t.onerror = () => rj(t.error); }); };
+const dbGetAll = async (store) => { const db = await openDB(); return new Promise((r, rj) => { const t = db.transaction(store,"readonly").objectStore(store).getAll(); t.onsuccess = () => r(t.result || []); t.onerror = () => rj(t.error); }); };
+const dbPut = async (store, val) => { const db = await openDB(); return new Promise((r, rj) => { const t = db.transaction(store,"readwrite").objectStore(store).put(val); t.onsuccess = () => r(); t.onerror = () => rj(t.error); }); };
+const dbDelete = async (store, key) => { const db = await openDB(); return new Promise((r, rj) => { const t = db.transaction(store,"readwrite").objectStore(store).delete(key); t.onsuccess = () => r(); t.onerror = () => rj(t.error); }); };
+const dbClear = async () => { const db = await openDB(); return new Promise((r, rj) => { const tx = db.transaction(["photos","meta"],"readwrite"); tx.objectStore("photos").clear(); tx.objectStore("meta").clear(); tx.oncomplete = () => r(); tx.onerror = () => rj(tx.error); }); };
 
-const VESTIA_SYSTEM_PROMPT = `You are Vestia — an editorial AI personal stylist with the sensibility of a Vogue creative director and the practicality of a personal shopper. Your voice is precise and evocative. You name colors specifically ("ochre," "slate," "ivory"). You always respond in the requested JSON format.`;
-
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open("vestia-db", 1);
-    req.onerror = () => reject(req.error);
-    req.onsuccess = () => resolve(req.result);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains("store")) db.createObjectStore("store");
-    };
-  });
-}
-
-async function dbGet(key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("store", "readonly");
-    const req = tx.objectStore("store").get(key);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function dbSet(key, value) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("store", "readwrite");
-    const req = tx.objectStore("store").put(value, key);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function dbDel(key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("store", "readwrite");
-    const req = tx.objectStore("store").delete(key);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function haptic(ms = 10) {
-  if (navigator.vibrate) navigator.vibrate(ms);
-}
-
-async function compressImage(file, maxWidth = 1200, quality = 0.85) {
-  return new Promise((resolve, reject) => {
+// ─── IMAGE COMPRESSION ─────────────────────────────────────────
+const compressImage = (file, maxDim = 1200, quality = 0.85) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = (e) => {
     const img = new Image();
     img.onload = () => {
+      let { width, height } = img;
+      if (width > height && width > maxDim) { height = (height * maxDim) / width; width = maxDim; }
+      else if (height > maxDim) { width = (width * maxDim) / height; height = maxDim; }
       const canvas = document.createElement("canvas");
-      let w = img.width, h = img.height;
-      if (w > maxWidth) { h = Math.round((h * maxWidth) / w); w = maxWidth; }
-      canvas.width = w; canvas.height = h;
-      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-      canvas.toBlob((blob) => resolve(blob), "image/jpeg", quality);
+      canvas.width = width; canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL("image/jpeg", quality);
+      resolve({ dataUrl, base64: dataUrl.split(",")[1], mediaType: "image/jpeg" });
     };
     img.onerror = reject;
-    img.src = URL.createObjectURL(file);
-  });
-}
-
-function fileToBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result.split(",")[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-async function fetchWeather(lat, lon) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}¤t=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto`;
-  const data = await (await fetch(url)).json();
-  const codeMap = {
-    0: "Clear", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
-    45: "Fog", 48: "Depositing rime fog",
-    51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
-    61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
-    71: "Slight snow", 73: "Moderate snow", 75: "Heavy snow",
-    80: "Rain showers", 81: "Moderate showers", 82: "Violent showers",
-    95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with heavy hail",
+    img.src = e.target.result;
   };
-  const c = data.current, d = data.daily;
-  return {
-    temp: Math.round(c.temperature_2m), feel: Math.round(c.apparent_temperature),
-    humidity: c.relative_humidity_2m, wind: Math.round(c.wind_speed_10m),
-    label: codeMap[c.weather_code] || "Unknown",
-    week: d.time.slice(0, 7).map((t, i) => ({
-      day: new Date(t).toLocaleDateString("en", { weekday: "short" }),
-      high: Math.round(d.temperature_2m_max[i]),
-      low: Math.round(d.temperature_2m_min[i]),
-      condition: codeMap[d.weather_code[i]] || "Unknown",
-    })),
-  };
-}
+  reader.onerror = reject;
+  reader.readAsDataURL(file);
+});
 
-async function askGemini(prompt, systemPrompt = null, maxTokens = 1200) {
-  haptic(5);
-  const payload = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      model: "gemini-2.0-flash", maxOutputTokens: maxTokens,
-      responseMimeType: "application/json", temperature: 0.7, topP: 0.95, topK: 40,
-    },
-  };
-  if (systemPrompt) payload.systemInstruction = systemPrompt;
-  const res = await fetch("/api/gemini", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || err.detail || `Gemini API error ${res.status}`);
-  }
-  const data = await res.json();
-  const candidate = data.candidates?.[0];
-  if (!candidate) throw new Error("No response from Gemini");
-  if (candidate.finishReason === "SAFETY") throw new Error("Response blocked by safety filter");
-  if (candidate.finishReason === "RECITATION") throw new Error("Response blocked due to copyright");
-  const text = candidate.content.parts[0].text;
-  const cleanJson = text.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/, "").trim();
-  try { return JSON.parse(cleanJson); }
-  catch (e) { console.error("Parse failed:", text); throw new Error("Invalid JSON from Gemini"); }
-}
+const haptic = (pattern = 10) => { if (navigator.vibrate) navigator.vibrate(pattern); };
 
-async function categorizeWithGeminiVision(imageBase64, originalName) {
-  const prompt = `Analyze this clothing item photo. Respond ONLY with JSON: {"name":"Descriptive name","category":"One of: Outerwear, Tops, Bottoms, Footwear, Accessories","color":"Color name","material":"Fabric or Unknown","season":"spring/summer/fall/winter/all","formality":"casual/smart-casual/business/formal","notes":"Notable details"}`;
-  const payload = {
-    contents: [{ role: "user", parts: [{ text: prompt }, { inlineData: { mimeType: "image/jpeg", data: imageBase64 } }] }],
-    generationConfig: { model: "gemini-2.0-flash", maxOutputTokens: 600, responseMimeType: "application/json", temperature: 0.2 },
-  };
-  const res = await fetch("/api/gemini", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-  if (!res.ok) return fallbackCategorize(originalName);
-  const data = await res.json();
-  const candidate = data.candidates?.[0];
-  if (!candidate || candidate.finishReason === "SAFETY") return fallbackCategorize(originalName);
-  const text = candidate.content.parts[0].text;
-  const cleanJson = text.replace(/^```json\s*/i, "").replace(/\s*```$/, "").trim();
-  try { return JSON.parse(cleanJson); } catch (e) { return fallbackCategorize(originalName); }
-}
-
-function fallbackCategorize(fileName) {
-  const name = fileName.replace(/\.[^/.]+$/, "").replace(/[_-]/g, " ");
-  const lower = name.toLowerCase();
-  let category = "Tops";
-  if (/coat|jacket|blazer|parka|bomber|trench|overcoat/i.test(lower)) category = "Outerwear";
-  else if (/jean|pant|trouser|short|skirt|chino|slack/i.test(lower)) category = "Bottoms";
-  else if (/shoe|boot|sneaker|loafer|heel|sandal|oxford/i.test(lower)) category = "Footwear";
-  else if (/watch|belt|bag|scarf|hat|tie|jewelry|sunglass|glove/i.test(lower)) category = "Accessories";
-  return { name: name.charAt(0).toUpperCase() + name.slice(1), category, color: "Unknown", material: "Unknown", season: "all", formality: "casual", notes: "Auto-categorized" };
-}
-
-async function generateSeedanceVideo(suggestion, userPhoto) {
-  const outfitDesc = Object.entries(suggestion.outfit || {}).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(", ");
-  const prompt = `A cinematic fashion portrait of a person wearing ${outfitDesc}. ${suggestion.mood} aesthetic. Editorial lighting, shallow depth of field, luxury fashion photography style. Full body visible.`;
-  const res = await fetch("/api/fal/proxy", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-fal-target-url": "https://110602490-seedance-lite.fal.run" },
-    body: JSON.stringify({ prompt, image_url: userPhoto, duration: 5, aspect_ratio: "9:16", resolution: "720p" }),
-  });
-  if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || "Video generation failed"); }
-  const data = await res.json();
-  return data.video?.url || data.url;
-}
-
+// ═══════════════════════════════════════════════════════════════
 export default function Vestia() {
-  const [tab, setTab] = useState("today");
-  const [onboarded, setOnboarded] = useState(false);
+  const [booted, setBooted] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardStep, setOnboardStep] = useState(0);
+
   const [wardrobe, setWardrobe] = useState([]);
-  const [activeCat, setActiveCat] = useState("Outerwear");
-  const [selectedItem, setSelectedItem] = useState(null);
-  const [uploading, setUploading] = useState(false);
+  const [userPhoto, setUserPhoto] = useState(null);
+  const [history, setHistory] = useState([]);
+
+  const [tab, setTab] = useState("today");
+  const [activeCat, setActiveCat] = useState("TOPS");
+
   const [weather, setWeather] = useState(null);
+  const [wLoading, setWLoading] = useState(false);
   const [locationName, setLocationName] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [loadingWeek, setLoadingWeek] = useState(false);
+
   const [suggestion, setSuggestion] = useState(null);
   const [weekPlan, setWeekPlan] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [userPhoto, setUserPhoto] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [loadingWeek, setLoadingWeek] = useState(false);
+
+  const [sdLoading, setSdLoading] = useState(false);
   const [sdVideo, setSdVideo] = useState(null);
   const [sdError, setSdError] = useState(null);
-  const [toastMsg, setToastMsg] = useState(null);
+  const [sdStatus, setSdStatus] = useState("");
+
+  const [selectedItem, setSelectedItem] = useState(null);
+  const [toast, setToast] = useState(null);
   const [installPrompt, setInstallPrompt] = useState(null);
-  const fileInputRef = useRef(null);
-  const photoInputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
 
-  const toast = useCallback((msg) => { setToastMsg(msg); setTimeout(() => setToastMsg(null), 2500); }, []);
-
+  // ─── Boot ───────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
-      const [w, h, wp, up, ob] = await Promise.all([dbGet("wardrobe"), dbGet("history"), dbGet("weekPlan"), dbGet("userPhoto"), dbGet("onboarded")]);
-      if (w) setWardrobe(w); if (h) setHistory(h); if (wp) setWeekPlan(wp); if (up) setUserPhoto(up); if (ob) setOnboarded(true);
+      try {
+        const [photos, userPhotoData, historyData, hasOnboarded] = await Promise.all([
+          dbGetAll("photos"),
+          dbGet("meta", "userPhoto"),
+          dbGet("meta", "history"),
+          dbGet("meta", "onboarded"),
+        ]);
+        setWardrobe(photos.filter(p => p.type === "clothing").sort((a,b) => (b.addedAt||0) - (a.addedAt||0)));
+        setUserPhoto(userPhotoData?.value || null);
+        setHistory(historyData?.value || []);
+        if (!hasOnboarded?.value) setShowOnboarding(true);
+      } catch(e) { console.error(e); }
+      setBooted(true);
     })();
-  }, []);
-
-  // ─── WEATHER WITH FALLBACK ───
-  useEffect(() => {
-    async function loadWeather() {
-      // Try geolocation first
-      if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition(
-          async (pos) => {
-            try {
-              const w = await fetchWeather(pos.coords.latitude, pos.coords.longitude);
-              setWeather(w);
-              const geo = await (await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${pos.coords.latitude}&longitude=${pos.coords.longitude}&localityLanguage=en`)).json();
-              setLocationName(geo.city || geo.locality || "Local");
-            } catch (e) {
-              console.error("Weather fetch failed", e);
-              toast("Weather unavailable — using defaults");
-            }
-          },
-          async (err) => {
-            console.error("Geolocation denied", err);
-            // Fallback: use IP-based location approximation (New York as default)
-            try {
-              const w = await fetchWeather(40.7128, -74.0060);
-              setWeather(w);
-              setLocationName("New York");
-              toast("Using default location — enable GPS for local weather");
-            } catch (e) {
-              toast("Weather unavailable");
-            }
-          },
-          { timeout: 10000, enableHighAccuracy: false }
-        );
-      } else {
-        // No geolocation API at all
-        try {
-          const w = await fetchWeather(40.7128, -74.0060);
-          setWeather(w);
-          setLocationName("New York");
-        } catch (e) { toast("Weather unavailable"); }
-      }
-    }
-    loadWeather();
-  }, []);
-
-  useEffect(() => {
     const handler = (e) => { e.preventDefault(); setInstallPrompt(e); };
-    window.addEventListener("beforeinstallprompt", handler);
-    return () => window.removeEventListener("beforeinstallprompt", handler);
+    window.addEventListener('beforeinstallprompt', handler);
+    return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
 
-  const steps = [
-    { eyebrow: "Welcome", title: "Your wardrobe, elevated.", body: "Vestia composes outfits from what you own. No shopping. No trends. Just intelligent styling." },
-    { eyebrow: "How it works", title: "Photograph your pieces.", body: "Upload your clothing by category. Vestia remembers every item, tracks how often you wear it, and never repeats a look too soon." },
-    { eyebrow: "The result", title: "Editorial intelligence.", body: "Each day, Vestia considers the weather, your rotation, and color theory to compose a look — with reasoning you can read." },
-  ];
+  const showToast = useCallback((msg, type = "info") => {
+    setToast({ msg, type, id: Date.now() });
+    haptic(type === "error" ? [50,30,50] : 15);
+    setTimeout(() => setToast(t => t?.msg === msg ? null : t), 3000);
+  }, []);
 
-  function finishOnboarding() { setOnboarded(true); dbSet("onboarded", true); haptic(30); }
+  // ─── Weather ────────────────────────────────────────────────────
+  const fetchWeather = useCallback(async (lat, lon) => {
+    setWLoading(true);
+    try {
+      const [wRes, gRes] = await Promise.all([
+        fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,apparent_temperature,relative_humidity_2m,wind_speed_10m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=7`),
+        fetch(`https://geocoding-api.open-meteo.com/v1/reverse?latitude=${lat}&longitude=${lon}&language=en`).catch(() => null),
+      ]);
+      const d = await wRes.json();
+      const c = d.current;
+      setWeather({
+        temp: Math.round(c.temperature_2m),
+        feel: Math.round(c.apparent_temperature),
+        humidity: c.relative_humidity_2m,
+        wind: Math.round(c.wind_speed_10m),
+        code: c.weather_code,
+        label: WMO_LABEL[c.weather_code] || "Clear",
+        week: d.daily.time.map((t, i) => ({
+          day: new Date(t + "T12:00:00").toLocaleDateString("en", { weekday: "short" }).toUpperCase().slice(0,3),
+          label: WMO_LABEL[d.daily.weather_code[i]] || "",
+          high: Math.round(d.daily.temperature_2m_max[i]),
+          low: Math.round(d.daily.temperature_2m_min[i]),
+        })),
+      });
+      if (gRes?.ok) {
+        const gd = await gRes.json();
+        if (gd.results?.[0]) setLocationName(`${gd.results[0].name}${gd.results[0].country_code ? ", " + gd.results[0].country_code : ""}`);
+      }
+    } catch (e) { console.error(e); }
+    setWLoading(false);
+  }, []);
 
-  // ─── FIXED: MULTIPLE FILE UPLOAD ───
-  async function handleClothingUpload(fileList) {
-    if (!fileList || fileList.length === 0) return;
+  const getLocation = useCallback(() => {
+    setWLoading(true);
+    if (!navigator.geolocation) { fetchWeather(48.8566, 2.3522); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos => fetchWeather(pos.coords.latitude, pos.coords.longitude),
+      () => { showToast("Using Paris", "info"); fetchWeather(48.8566, 2.3522); },
+      { timeout: 10000, maximumAge: 600000 }
+    );
+  }, [fetchWeather, showToast]);
 
-    // BUG FIX #2: Copy FileList to array IMMEDIATELY before any async operations
-    // FileList is live and gets cleared when we reset the input
-    const files = Array.from(fileList);
+  useEffect(() => { if (booted) getLocation(); }, [booted, getLocation]);
 
+  // ─── Uploads ───────────────────────────────────────────────────
+  const handleClothingUpload = async (files) => {
+    if (!files?.length) return;
+    setUploading(true);
+    const items = [];
+    try {
+      for (const f of Array.from(files)) {
+        if (!f.type.startsWith("image/")) continue;
+        const { dataUrl, base64, mediaType } = await compressImage(f, 1200, 0.85);
+        const item = {
+          id: `c_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+          type: "clothing",
+          category: CAT_KEY[activeCat],
+          categoryLabel: activeCat,
+          url: dataUrl, base64, mediaType,
+          name: f.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ").slice(0, 40),
+          wearCount: 0,
+          lastWorn: null,
+          addedAt: Date.now(),
+        };
+        await dbPut("photos", item);
+        items.push(item);
+      }
+      setWardrobe(w => [...items, ...w]);
+      haptic(20);
+      showToast(`Added ${items.length} piece${items.length > 1 ? "s" : ""}`, "success");
+    } catch(e) { console.error(e); showToast("Upload failed", "error"); }
+    setUploading(false);
+  };
+
+  const handleUserPhoto = async (f) => {
+    if (!f?.type.startsWith("image/")) return;
     setUploading(true);
     try {
-      for (const file of files) {
-        const compressed = await compressImage(file, 1200, 0.85);
-        const base64 = await fileToBase64(compressed);
+      const { dataUrl, base64, mediaType } = await compressImage(f, 800, 0.88);
+      const data = { url: dataUrl, base64, mediaType };
+      await dbPut("meta", { key: "userPhoto", value: data });
+      setUserPhoto(data);
+      haptic(20);
+      showToast("Photo updated", "success");
+    } catch(e) { showToast("Failed to save", "error"); }
+    setUploading(false);
+  };
 
-        let categoryData;
-        try { categoryData = await categorizeWithGeminiVision(base64, file.name); }
-        catch (e) { categoryData = fallbackCategorize(file.name); }
+  const removeItem = async (item) => {
+    await dbDelete("photos", item.id);
+    setWardrobe(w => w.filter(i => i.id !== item.id));
+    setSelectedItem(null);
+    haptic(25);
+    showToast("Removed");
+  };
 
-        // BUG FIX #1: Use AI-detected category, NOT activeCat
-        // The AI returns the correct category from the photo analysis
-        const detectedCategory = categoryData.category;
-        // Validate it's one of our allowed categories
-        const validCategory = CATS.includes(detectedCategory) ? detectedCategory : activeCat;
-
-        const newItem = {
-          id: Date.now() + Math.random(),
-          name: categoryData.name || file.name.replace(/\.[^/.]+$/, ""),
-          categoryLabel: validCategory,  // ← FIXED: uses AI category, not activeCat
-          color: categoryData.color || "Unknown",
-          material: categoryData.material || "Unknown",
-          season: categoryData.season || "all",
-          formality: categoryData.formality || "casual",
-          notes: categoryData.notes || "",
-          photo: URL.createObjectURL(compressed),
-          wearCount: 0, lastWorn: null,
-          dateAdded: new Date().toISOString(),
-        };
-
-        setWardrobe(prev => { const updated = [...prev, newItem]; dbSet("wardrobe", updated); return updated; });
-        toast(`Added: ${newItem.name} (${validCategory})`);
-        haptic(20);
-      }
-    } catch (err) {
-      console.error("Upload failed:", err);
-      toast("Upload failed — " + err.message);
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  }
-
-  async function handleUserPhoto(file) {
-    if (!file) return;
-    try {
-      const compressed = await compressImage(file, 800, 0.9);
-      const reader = new FileReader();
-      reader.onloadend = async () => { const dataUrl = reader.result; setUserPhoto(dataUrl); await dbSet("userPhoto", dataUrl); toast("Profile photo updated"); haptic(20); };
-      reader.readAsDataURL(compressed);
-    } catch (err) { toast("Photo upload failed"); }
-  }
-
-  async function generateOutfit() {
-    if (wardrobe.length < 2) { toast("Add at least 2 wardrobe pieces first"); return; }
-    if (!weather) { toast("Waiting for weather data..."); return; }
+  // ─── Outfit suggestion ──────────────────────────────────────────
+  const getSuggestion = async () => {
+    if (wardrobe.length < 2) return showToast("Add 2+ pieces first", "error");
     setLoading(true); setSuggestion(null); setSdVideo(null); setSdError(null);
+    haptic(15);
+
     try {
-      const recentOutfits = history.slice(0, 7).map((h) => Object.values(h.outfit || {}).filter(Boolean).join(" + ")).join("\n");
-      const prompt = `You are Vestia, a luxury personal stylist.\n\nAVAILABLE WARDROBE:\n${wardrobe.map((item) => `- ${item.name} (${item.categoryLabel}, worn ${item.wearCount}x${item.lastWorn ? ", last: " + item.lastWorn : ""})`).join("\n")}\n\nTODAY'S WEATHER:\n- Temperature: ${weather.temp}°C (feels like ${weather.feel}°C)\n- Conditions: ${weather.label}\n- Humidity: ${weather.humidity}%\n- Wind: ${weather.wind}km/h\n\nRECENT OUTFITS (avoid repeating):\n${recentOutfits || "None yet"}\n\nTASK: Compose today's outfit. Consider weather, color harmony, occasion versatility, rotation principle, no repeats.\n\nRespond ONLY with JSON: {"mood":"word","occasion":"occasion","outfit":{"Outerwear":"item or null","Top":"item or null","Bottom":"item or null","Footwear":"item or null","Accessory":"item or null"},"styleScore":0-100,"weatherScore":0-100,"reasoning":"commentary","colorStory":"palette","tips":["tip1","tip2"]}`;
-      const result = await askGemini(prompt, VESTIA_SYSTEM_PROMPT, 1500);
-      if (!result.outfit || !result.mood) throw new Error("Invalid response structure");
-      setSuggestion(result);
-      const entry = { id: Date.now(), date: new Date().toISOString(), outfit: result.outfit, mood: result.mood, weather, reasoning: result.reasoning };
-      const newHistory = [entry, ...history];
-      setHistory(newHistory); await dbSet("history", newHistory);
-      const updatedWardrobe = wardrobe.map((item) => {
-        const wornToday = Object.values(result.outfit || {}).includes(item.name);
-        if (wornToday) return { ...item, wearCount: (item.wearCount || 0) + 1, lastWorn: new Date().toLocaleDateString("en", { month: "short", day: "numeric" }) };
-        return item;
+      const desc = wardrobe.map((i, x) => `[${x+1}] ${i.categoryLabel}: "${i.name}" (worn ${i.wearCount}×, last:${i.lastWorn || "never"})`).join("\n");
+      const w = weather;
+      const promptText = `World-class personal stylist for an editorial fashion app.
+
+LIVE WEATHER: ${w?.label || "Clear"}, ${w?.temp || 20}°C, feels ${w?.feel || 19}°C, humidity ${w?.humidity || 50}%, wind ${w?.wind || 10}km/h.
+
+WARDROBE:
+${desc}
+
+${userPhoto ? "First image = user's photo. Remaining = wardrobe items." : "Images = wardrobe items."}
+
+Reply ONLY with valid JSON (no markdown, no backticks):
+{
+  "outfit": {"top":"name","bottom":"name","shoes":"name","outerwear":null,"accessories":null},
+  "mood": "one evocative word — like 'Composed' or 'Intimate'",
+  "reasoning": "2 sentences in fashion editor voice — restrained, observational",
+  "styleScore": 88,
+  "weatherScore": 94,
+  "tips": ["tip 1", "tip 2"],
+  "occasion": "Editorial / Work / Soirée / Leisure",
+  "colorStory": "palette harmony in 1 sentence",
+  "videoPrompt": "Cinematic fashion editorial. Subject wearing [describe each piece in detail]. Slow camera dolly, soft natural light, minimal background, shallow depth of field, 5 seconds."
+}`;
+
+      const parts = [
+        ...(userPhoto ? [{ inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } }] : []),
+        ...wardrobe.slice(0, 6).map(i => ({ inline_data: { mime_type: i.mediaType, data: i.base64 } })),
+        { text: promptText },
+      ];
+      const reqBody = {
+        contents: [{ role: "user", parts }],
+        generationConfig: { temperature: 0.9, maxOutputTokens: 1200, responseMimeType: "application/json" },
+      };
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+
+      let data;
+      if (window.Capacitor?.isNativePlatform?.()) {
+        const resp = await window.Capacitor.Plugins.CapacitorHttp.post({
+          url,
+          headers: { "Content-Type": "application/json" },
+          data: reqBody,
+        });
+        if (resp.status >= 400) throw new Error(resp.data?.error?.message || `API error ${resp.status}`);
+        data = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+      } else {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(reqBody),
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          let errMsg = `API error ${res.status}`;
+          try { const j = JSON.parse(errText); errMsg = j.error?.message || j.error || errMsg; } catch {}
+          throw new Error(errMsg);
+        }
+        data = await res.json();
+      }
+      const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      setSuggestion(parsed);
+
+      const entry = { date: new Date().toISOString(), outfit: parsed.outfit, mood: parsed.mood, weather: { temp: w?.temp, label: w?.label } };
+      const newHistory = [entry, ...history].slice(0, 50);
+      setHistory(newHistory);
+      await dbPut("meta", { key: "history", value: newHistory });
+
+      const vals = Object.values(parsed.outfit || {}).filter(Boolean).join(" ").toLowerCase();
+      for (const item of wardrobe) {
+        if (vals.includes(item.name.toLowerCase())) {
+          const updated = { ...item, wearCount: item.wearCount + 1, lastWorn: new Date().toISOString().split("T")[0] };
+          await dbPut("photos", updated);
+          setWardrobe(w => w.map(i => i.id === item.id ? updated : i));
+        }
+      }
+      haptic([10,30,10]);
+    } catch (e) {
+      console.error(e);
+      setSuggestion({ error: true, message: e.message });
+      showToast("Generation failed", "error");
+    }
+    setLoading(false);
+  };
+
+  // ─── Week plan ──────────────────────────────────────────────────
+  const getWeekPlan = async () => {
+    if (wardrobe.length < 5) return showToast("Add 5+ pieces first", "error");
+    setLoadingWeek(true); setWeekPlan(null); haptic(15);
+    try {
+      const desc = wardrobe.map((i, x) => `[${x+1}] ${i.categoryLabel}: "${i.name}"`).join("\n");
+      const forecast = weather?.week?.map(d => `${d.day}: ${d.label}, ${d.high}°/${d.low}°C`).join("\n") || "Mild week";
+
+      const isNative = window.Capacitor?.isNativePlatform?.();
+      const promptText = `Editorial personal stylist. Plan 7 days of outfits. Each item used max twice.
+
+FORECAST:
+${forecast}
+
+WARDROBE:
+${desc}
+
+Reply ONLY with JSON:
+{"days":[{"day":"MON","outfit":{"top":"...","bottom":"...","shoes":"...","outerwear":null},"mood":"word","note":"one elegant sentence"}],"philosophy":"one sentence"}`;
+      const reqBody = {
+        contents: [{ role: "user", parts: [{ text: promptText }] }],
+        generationConfig: { temperature: 0.9, maxOutputTokens: 1500, responseMimeType: "application/json" },
+      };
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+      let data;
+      if (isNative) {
+        const resp = await window.Capacitor.Plugins.CapacitorHttp.post({
+          url,
+          headers: { "Content-Type": "application/json" },
+          data: reqBody,
+        });
+        if (resp.status >= 400) throw new Error(`API error ${resp.status}`);
+        data = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+      } else {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(reqBody),
+        });
+        if (!res.ok) throw new Error(`API error ${res.status}`);
+        data = await res.json();
+      }
+      const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
+      setWeekPlan(JSON.parse(text.replace(/```json|```/g, "").trim()));
+      haptic([10,30,10]);
+    } catch(e) { console.error(e); showToast("Week plan failed", "error"); }
+    setLoadingWeek(false);
+  };
+
+  // ─── Video generation ───────────────────────────────────────────
+  const generateVideo = async () => {
+    if (!suggestion?.videoPrompt) return;
+    if (!userPhoto) return showToast("Add profile photo first", "error");
+
+    setSdLoading(true);
+    setSdVideo(null);
+    setSdError(null);
+    setSdStatus("Submitting to Seedance...");
+    haptic(15);
+
+    try {
+      const result = await fal.subscribe("fal-ai/bytedance/seedance/v1/lite/image-to-video", {
+        input: {
+          prompt: suggestion.videoPrompt,
+          image_url: userPhoto.url,
+          duration: "5",
+          resolution: "720p",
+          aspect_ratio: "9:16",
+        },
+        logs: true,
+        onQueueUpdate: (update) => {
+          if (update.status === "IN_QUEUE") setSdStatus("In queue...");
+          else if (update.status === "IN_PROGRESS") {
+            const lastLog = update.logs?.[update.logs.length - 1]?.message || "Generating...";
+            setSdStatus(lastLog.slice(0, 50));
+          }
+        },
       });
-      setWardrobe(updatedWardrobe); await dbSet("wardrobe", updatedWardrobe);
-      toast("Outfit composed");
-    } catch (err) { console.error(err); setSuggestion({ error: true, message: err.message }); toast("Generation failed — " + err.message); }
-    finally { setLoading(false); }
-  }
 
-  async function generateWeekPlan() {
-    if (wardrobe.length < 5) { toast("Add at least 5 pieces for weekly planning"); return; }
-    if (!weather?.week) { toast("Weather forecast unavailable"); return; }
-    setLoadingWeek(true); setWeekPlan(null);
-    try {
-      const prompt = `You are Vestia, a luxury personal stylist planning a cohesive week.\n\nAVAILABLE WARDROBE:\n${wardrobe.map((item) => `- ${item.name} (${item.categoryLabel}, worn ${item.wearCount}x)`).join("\n")}\n\n7-DAY WEATHER FORECAST:\n${weather.week.slice(0, 7).map((d) => `- ${d.day}: High ${d.high}°C, Low ${d.low}°C, ${d.condition}`).join("\n")}\n\nRULES: 1. Plan Mon-Sun. 2. No item worn more than twice. 3. Match to weather. 4. Cohesive narrative. 5. Daily style note.\n\nRespond ONLY with JSON: {"days":[{"day":"Monday","outfit":{"Outerwear":"item or null","Top":"item or null","Bottom":"item or null","Footwear":"item or null","Accessory":"item or null"},"note":"editorial note"}],"philosophy":"week narrative"}`;
-      const result = await askGemini(prompt, VESTIA_SYSTEM_PROMPT, 2500);
-      if (!result.days || result.days.length !== 7) throw new Error("Invalid week plan structure");
-      setWeekPlan(result); await dbSet("weekPlan", result); toast("Week planned");
-    } catch (err) { toast("Week planning failed — " + err.message); }
-    finally { setLoadingWeek(false); }
-  }
+      const videoUrl = result.data?.video?.url;
+      if (!videoUrl) throw new Error("No video URL");
+      setSdVideo(videoUrl);
+      setSdStatus("");
+      showToast("Video ready", "success");
+      haptic([20,50,20,50,20]);
+    } catch (e) {
+      console.error(e);
+      setSdError(e.message || "Video generation failed");
+      showToast("Video failed", "error");
+    }
+    setSdLoading(false);
+  };
 
-  async function handleGenerateVideo() {
-    if (!userPhoto) { toast("Add profile photo first"); return; }
-    if (!suggestion || suggestion.error) { toast("Generate an outfit first"); return; }
-    setSdVideo(null); setSdError(null); toast("Generating video...");
-    try { const url = await generateSeedanceVideo(suggestion, userPhoto); setSdVideo(url); toast("Video ready"); }
-    catch (err) { setSdError(err.message || "Video generation failed"); toast("Video failed"); }
-  }
+  const installPWA = async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    const { outcome } = await installPrompt.userChoice;
+    if (outcome === "accepted") showToast("Installed", "success");
+    setInstallPrompt(null);
+  };
 
-  async function clearAllData() {
-    if (!confirm("Erase all wardrobe, history, and photos? This cannot be undone.")) return;
-    await Promise.all([dbDel("wardrobe"), dbDel("history"), dbDel("weekPlan"), dbDel("userPhoto"), dbDel("onboarded")]);
-    setWardrobe([]); setHistory([]); setWeekPlan(null); setUserPhoto(null); setSuggestion(null); setOnboarded(false);
-    toast("All data cleared"); haptic(50);
-  }
+  const finishOnboarding = async () => {
+    await dbPut("meta", { key: "onboarded", value: { value: true, at: Date.now() } });
+    setShowOnboarding(false);
+    haptic(30);
+  };
 
-  const filtered = wardrobe.filter((i) => i.categoryLabel === activeCat);
+  const clearAllData = async () => {
+    if (!window.confirm("Clear all Vestia data? This cannot be undone.")) return;
+    await dbClear();
+    window.location.reload();
+  };
 
-  // ─── RENDER ───
-  if (!onboarded) {
+  const filtered = useMemo(() => wardrobe.filter(i => i.categoryLabel === activeCat), [wardrobe, activeCat]);
+  const totalWears = useMemo(() => wardrobe.reduce((s, i) => s + (i.wearCount || 0), 0), [wardrobe]);
+
+  // ── Boot screen ──
+  if (!booted) {
     return (
-      <div className="onboard-screen">
-        <div className="onboard-card">
-          <p className="onboard-eyebrow">{steps[onboardStep].eyebrow}</p>
-          <h1>{steps[onboardStep].title}</h1>
-          <p>{steps[onboardStep].body}</p>
-          <div className="onboard-dots">
-            {steps.map((_, i) => (
-              <span key={i} className={`dot ${i === onboardStep ? 'active' : ''}`} />
-            ))}
-          </div>
-          <button onClick={() => {
-            if (onboardStep < steps.length - 1) setOnboardStep(onboardStep + 1);
-            else finishOnboarding();
-          }}>
-            {onboardStep < steps.length - 1 ? 'Next' : 'Get Started'}
-          </button>
-        </div>
+      <div className="boot-loader">
+        <div className="boot-mark">V</div>
       </div>
     );
   }
 
+  // ── Onboarding ──
+  if (showOnboarding) {
+    const steps = [
+      { eyebrow: "WELCOME", title: "An editorial of one.", body: "Vestia treats your wardrobe like a magazine treats its archive — with care, perspective, and an eye for what matters." },
+      { eyebrow: "STEP I", title: "Build the archive.", body: "Photograph each piece you own. Tops, bottoms, shoes, outerwear. The more Vestia sees, the sharper its recommendations." },
+      { eyebrow: "STEP II", title: "Read the day.", body: "Live weather. Real conditions. Vestia composes outfits for the day you're actually living — not an imagined one." },
+      { eyebrow: "STEP III", title: "Style with intention.", body: "Daily looks. Week-ahead planning. Cinematic AI previews. Everything private. Everything yours." },
+    ];
+    const step = steps[onboardStep];
+    return (
+      <div className="onboard">
+        <div className="onboard-mark">VESTIA</div>
+        <div className="onboard-num">{String(onboardStep + 1).padStart(2,'0')} / {String(steps.length).padStart(2,'0')}</div>
+
+        <div className="onboard-content">
+          <div key={onboardStep} className="fade-up">
+            <div className="onboard-eyebrow">{step.eyebrow}</div>
+            <h1 className="onboard-title">{step.title}</h1>
+            <p className="onboard-body">{step.body}</p>
+          </div>
+        </div>
+
+        <div className="onboard-progress">
+          {steps.map((_, i) => (
+            <div key={i} className={`onboard-dot${i <= onboardStep ? " done" : ""}`} />
+          ))}
+        </div>
+
+        <button className="btn btn-block btn-dark" onClick={() => { haptic(15); onboardStep < steps.length - 1 ? setOnboardStep(onboardStep + 1) : finishOnboarding(); }}>
+          <span>{onboardStep < steps.length - 1 ? "Continue" : "Begin"}</span>
+        </button>
+
+        {onboardStep < steps.length - 1 && (
+          <button className="btn-text" style={{marginTop: 12, width: "100%"}} onClick={finishOnboarding}>
+            Skip introduction
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // MAIN APP
+  // ═══════════════════════════════════════════════════════════
   return (
-    <div className="app">
-      <header>
-        <h1>VESTIA</h1>
-        <p className="date">{TODAY_ISSUE} {locationName && `· ${locationName}`}</p>
-        {weather && (
-          <div className="weather-bar">
-            <span>{weather.temp}°C feels {weather.feel}°C</span>
-            <span>{weather.label} · 💧{weather.humidity}% · 💨{weather.wind}km/h</span>
+    <div className="shell">
+      <div className="frame">
+
+        {toast && (
+          <div className={`toast ${toast.type}`}>{toast.msg}</div>
+        )}
+
+        {installPrompt && (
+          <div className="install-banner">
+            <div style={{flex:1}}>
+              <div style={{fontFamily:"var(--sans)",fontSize:9,letterSpacing:".22em",color:"var(--ochre-pale)",marginBottom:2}}>INSTALL VESTIA</div>
+              <div style={{fontFamily:"var(--serif)",fontStyle:"italic",fontSize:13,color:"var(--bone)"}}>Add to home screen</div>
+            </div>
+            <button className="btn-text" style={{color:"var(--bone)"}} onClick={installPWA}>Install</button>
+            <button className="btn-text" style={{color:"var(--ash)"}} onClick={() => setInstallPrompt(null)}>×</button>
           </div>
         )}
-      </header>
 
-      <nav className="tabs">
-        {['today', 'wardrobe', 'week', 'look'].map(t => (
-          <button key={t} className={tab === t ? 'active' : ''} onClick={() => { setTab(t); haptic(5); }}>
-            {t.charAt(0).toUpperCase() + t.slice(1)}
-          </button>
-        ))}
-      </nav>
-
-      {tab === 'today' && (
-        <section className="today">
-          {!suggestion && !loading && (
-            <button className="generate-btn" onClick={generateOutfit}>Compose Today's Look</button>
-          )}
-          {loading && <p className="loading">Composing your look...</p>}
-          {suggestion?.error && <p className="error">{suggestion.message}</p>}
-          {suggestion && !suggestion.error && (
-            <div className="suggestion-card">
-              <h2>{suggestion.mood} · {suggestion.occasion}</h2>
-              <div className="outfit-grid">
-                {Object.entries(suggestion.outfit).map(([cat, item]) => (
-                  <div key={cat} className="outfit-slot">
-                    <label>{cat}</label>
-                    <p>{item || '—'}</p>
+        {/* MASTHEAD */}
+        <header className="masthead">
+          <div className="masthead-content">
+            <div className="masthead-row">
+              <div>
+                <h1 className="wordmark"><span className="v-italic">V</span>estia</h1>
+                <div className="wordmark-tagline">Editorial Style Intelligence</div>
+              </div>
+              <button onClick={() => { haptic(10); getLocation(); }} style={{textAlign:"right"}}>
+                {wLoading ? (
+                  <div className="loader" style={{color:"var(--stone)"}}>
+                    <span className="loader-dot"/><span className="loader-dot"/><span className="loader-dot"/>
                   </div>
-                ))}
-              </div>
-              <p className="reasoning">{suggestion.reasoning}</p>
-              <p className="color-story">🎨 {suggestion.colorStory}</p>
-              <div className="scores">
-                <span>Style: {suggestion.styleScore}/100</span>
-                <span>Weather: {suggestion.weatherScore}/100</span>
-              </div>
-              {suggestion.tips && (
-                <ul className="tips">{suggestion.tips.map((t, i) => <li key={i}>{t}</li>)}</ul>
-              )}
-              <button onClick={handleGenerateVideo}>Generate Look Video</button>
-              {sdVideo && <video src={sdVideo} controls className="sd-video" />}
-              {sdError && <p className="error">{sdError}</p>}
+                ) : weather ? (
+                  <>
+                    <div style={{fontFamily:"var(--serif)",fontStyle:"italic",fontSize:24,fontWeight:300,lineHeight:1,fontVariationSettings:'"opsz" 144'}}>
+                      {weather.temp}°
+                    </div>
+                    <div style={{fontFamily:"var(--sans)",fontSize:8,letterSpacing:".22em",color:"var(--stone)",marginTop:3,textTransform:"uppercase"}}>
+                      {(locationName || weather.label).slice(0, 22)}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{fontSize:9,letterSpacing:".22em",color:"var(--stone)"}}>TAP FOR WEATHER</div>
+                )}
+              </button>
             </div>
-          )}
-        </section>
-      )}
-
-      {tab === 'wardrobe' && (
-        <section className="wardrobe">
-          <div className="wardrobe-header">
-            <div className="cat-tabs">
-              {CATS.map(cat => (
-                <button key={cat} className={activeCat === cat ? 'active' : ''} onClick={() => setActiveCat(cat)}>
-                  {cat}
+            <nav className="nav">
+              {[{id:"today",l:"Today"},{id:"wardrobe",l:"Wardrobe"},{id:"week",l:"Week"},{id:"history",l:"History"},{id:"profile",l:"Profile"}].map(t => (
+                <button key={t.id} onClick={() => { haptic(8); setTab(t.id); }} className={`nav-item${tab === t.id ? " active" : ""}`}>
+                  {t.l}
                 </button>
               ))}
-            </div>
-            <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={e => handleClothingUpload(e.target.files)} />
-            <button onClick={() => fileInputRef.current?.click()} disabled={uploading}>
-              {uploading ? 'Uploading...' : '+ Add Items'}
-            </button>
+            </nav>
           </div>
-          <div className="wardrobe-grid">
-            {filtered.length === 0 && <p className="empty">No items in {activeCat}</p>}
-            {filtered.map(item => (
-              <div key={item.id} className={`item-card ${selectedItem?.id === item.id ? 'selected' : ''}`} onClick={() => setSelectedItem(item)}>
-                <img src={item.photo} alt={item.name} />
-                <p>{item.name}</p>
-                <small>Worn: {item.wearCount}x</small>
-              </div>
-            ))}
-          </div>
-          {selectedItem && (
-            <div className="item-detail">
-              <h3>{selectedItem.name}</h3>
-              <p>{selectedItem.categoryLabel} · {selectedItem.color} · {selectedItem.material}</p>
-              <p>{selectedItem.formality} · {selectedItem.season}</p>
-              <p>{selectedItem.notes}</p>
-              <button onClick={() => setSelectedItem(null)}>Close</button>
-            </div>
-          )}
-        </section>
-      )}
+        </header>
 
-      {tab === 'week' && (
-        <section className="week">
-          <button onClick={generateWeekPlan} disabled={loadingWeek}>
-            {loadingWeek ? 'Planning...' : 'Generate Week Plan'}
-          </button>
-          {weekPlan && (
-            <div className="week-grid">
-              {weekPlan.days.map((day, i) => (
-                <div key={i} className="day-card">
-                  <h3>{day.day}</h3>
-                  <div className="outfit-mini">
-                    {Object.entries(day.outfit).map(([cat, item]) => (
-                      <p key={cat}><strong>{cat}:</strong> {item || '—'}</p>
+        {/* ISSUE BAR */}
+        <div className="issue">
+          <div className="issue-label">Issue №{String(history.length + 1).padStart(3, '0')}</div>
+          <div className="issue-num">{TODAY_ISSUE}</div>
+        </div>
+
+        {/* ─── TODAY ─── */}
+        {tab === "today" && (
+          <div className="fade-up">
+            <div className="section">
+              <div className="editorial-head">
+                <div>
+                  <div className="numeral">№ 01</div>
+                  <h2 className="type-headline" style={{marginTop:6}}>The Look,<br/><span className="type-italic">today.</span></h2>
+                </div>
+              </div>
+            </div>
+
+            {weather && (
+              <div className="weather">
+                <div className="weather-row">
+                  <div className="weather-temp">
+                    {weather.temp}<span className="deg">°</span>
+                  </div>
+                  <div className="weather-meta">
+                    <div className="weather-meta-row"><span className="weather-meta-label">Feels</span><span className="weather-meta-val">{weather.feel}°</span></div>
+                    <div className="weather-meta-row"><span className="weather-meta-label">Humidity</span><span className="weather-meta-val">{weather.humidity}%</span></div>
+                    <div className="weather-meta-row"><span className="weather-meta-label">Wind</span><span className="weather-meta-val">{weather.wind}<span style={{fontSize:9,fontStyle:"normal"}}>km/h</span></span></div>
+                  </div>
+                </div>
+                <div className="weather-label">{weather.label}</div>
+                {locationName && <div className="weather-loc">{locationName}</div>}
+              </div>
+            )}
+
+            <div className="section">
+              <button className="btn btn-block btn-dark" onClick={getSuggestion} disabled={loading}>
+                {loading ? (
+                  <>
+                    <span className="loader"><span className="loader-dot"/><span className="loader-dot"/><span className="loader-dot"/></span>
+                    <span>Composing</span>
+                  </>
+                ) : <span>Compose Today's Look</span>}
+              </button>
+            </div>
+
+            {suggestion && !suggestion.error && (
+              <div className="fade-up">
+                {/* Mood */}
+                <div className="mood-mark">
+                  <div className="mood-word">{suggestion.mood}</div>
+                  <div className="mood-sub">{suggestion.occasion}</div>
+                </div>
+
+                {/* The look */}
+                <div className="section">
+                  <div className="divider">
+                    <span className="divider-label">The Composition</span>
+                  </div>
+                  <div>
+                    {Object.entries(suggestion.outfit||{}).filter(([,v])=>v).map(([part, val], i) => (
+                      <div key={part} className="composition-row">
+                        <span className="composition-num">{String(i+1).padStart(2,'0')}</span>
+                        <span className="composition-label">{part}</span>
+                        <span className="composition-name">{val}</span>
+                      </div>
                     ))}
                   </div>
-                  <p className="note">{day.note}</p>
+                </div>
+
+                {/* Scores */}
+                <div className="scores">
+                  <div className="score">
+                    <div className="score-num">{suggestion.styleScore}<span className="of">/100</span></div>
+                    <div className="score-label">Style Index</div>
+                  </div>
+                  <div className="score">
+                    <div className="score-num">{suggestion.weatherScore}<span className="of">/100</span></div>
+                    <div className="score-label">Weather Fit</div>
+                  </div>
+                </div>
+
+                {/* Reasoning */}
+                <div className="section">
+                  <p className="pull-quote">{suggestion.reasoning}</p>
+                </div>
+
+                {/* Color story */}
+                {suggestion.colorStory && (
+                  <div className="section">
+                    <div className="divider"><span className="divider-label">Color Story</span></div>
+                    <p className="type-italic" style={{fontSize:17,lineHeight:1.6,color:"var(--graphite)"}}>{suggestion.colorStory}</p>
+                  </div>
+                )}
+
+                {/* Notes */}
+                {suggestion.tips && (
+                  <div className="section">
+                    <div className="divider"><span className="divider-label">Stylist's Notes</span></div>
+                    <ul className="notes">
+                      {suggestion.tips.map((t, i) => (
+                        <li key={i} className="note-item">
+                          <span className="note-num">{String(i+1).padStart(2,'0')}.</span>
+                          <span className="note-text">{t}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Cinema (video) */}
+                <div className="section" style={{padding:0}}>
+                  <div className="cinema">
+                    <div className="cinema-eyebrow">
+                      <span className="cinema-label">Cinema</span>
+                      <span className="cinema-attribution">Seedance × ByteDance</span>
+                    </div>
+                    <h3 className="cinema-title">A moving portrait,<br/><span className="type-italic">in five seconds.</span></h3>
+                    <p className="cinema-body">Generate a cinematic vertical video of you wearing this exact composition. Renders in 30–90 seconds.</p>
+                    <button className="btn btn-block" onClick={generateVideo} disabled={sdLoading || !userPhoto}>
+                      {sdLoading ? (
+                        <>
+                          <span className="loader"><span className="loader-dot"/><span className="loader-dot"/><span className="loader-dot"/></span>
+                          <span>{sdStatus || "Rendering"}</span>
+                        </>
+                      ) : !userPhoto ? <span>Add Profile Photo First</span> : <span>Generate Video</span>}
+                    </button>
+                    {sdVideo && (
+                      <div style={{marginTop: 16, border: "0.5px solid var(--ochre-deep)"}}>
+                        <video src={sdVideo} controls autoPlay loop muted playsInline style={{width: "100%", display: "block"}}/>
+                        <a href={sdVideo} download="vestia-look.mp4" target="_blank" rel="noopener"
+                          style={{display: "block", padding: "12px", textAlign: "center", fontFamily: "var(--sans)", fontSize: 9, letterSpacing: ".22em", textTransform: "uppercase", color: "var(--ochre-pale)", background: "var(--ink-soft)", textDecoration: "none", borderTop: "0.5px solid var(--graphite)"}}>
+                          Download Video
+                        </a>
+                      </div>
+                    )}
+                    {sdError && <div style={{marginTop: 12, padding: "10px 14px", fontFamily: "var(--serif)", fontStyle: "italic", fontSize: 12, color: "var(--rust)", background: "rgba(160,74,46,.1)", border: "0.5px solid var(--rust)"}}>{sdError}</div>}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {suggestion?.error && (
+              <div className="section">
+                <div style={{padding: "16px 18px", border: "0.5px solid var(--rust)", color: "var(--rust)", fontFamily: "var(--serif)", fontStyle: "italic", fontSize: 14, lineHeight: 1.5}}>
+                  {suggestion.message || "Unable to generate. Try again."}
+                </div>
+              </div>
+            )}
+
+            {!suggestion && !loading && wardrobe.length < 2 && (
+              <div className="section">
+                <div className="empty">
+                  <div className="empty-mark">◇</div>
+                  <h3 className="empty-title">Begin with the wardrobe.</h3>
+                  <p className="empty-body">Add at least two pieces — Vestia composes from what you have.</p>
+                  <button className="btn" onClick={() => setTab("wardrobe")}>
+                    <span>Build Wardrobe</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ─── WARDROBE ─── */}
+        {tab === "wardrobe" && (
+          <div className="fade-up">
+            <div className="section">
+              <div className="editorial-head">
+                <div>
+                  <div className="numeral">№ 02</div>
+                  <h2 className="type-headline" style={{marginTop:6}}>The <span className="type-italic">Archive</span></h2>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <div className="type-num" style={{fontSize:42,fontStyle:"italic"}}>{wardrobe.length}</div>
+                  <div className="type-meta" style={{color:"var(--stone)"}}>Pieces</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="pills">
+              {CATS.map(cat => {
+                const cnt = wardrobe.filter(i => i.categoryLabel === cat).length;
+                return (
+                  <button key={cat} onClick={() => { haptic(8); setActiveCat(cat); }} className={`pill${activeCat === cat ? " active" : ""}`}>
+                    {cat}{cnt > 0 && <span className="pill-count">({cnt})</span>}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="section">
+              <label className="upload">
+                <input className="upload-input" type="file" accept="image/*" multiple onChange={e => handleClothingUpload(e.target.files)}/>
+                <div className="upload-mark">{uploading ? "◌" : "+"}</div>
+                <div className="upload-title">{uploading ? "Adding…" : `Add to ${activeCat.toLowerCase()}`}</div>
+                <div className="upload-hint">Tap · Multiple OK</div>
+              </label>
+
+              {filtered.length > 0 ? (
+                <div className="grid-2 stagger">
+                  {filtered.map((item, i) => (
+                    <div key={item.id} className="tile" onClick={() => { haptic(10); setSelectedItem(item); }}>
+                      <div className="tile-image">
+                        <img src={item.url} alt={item.name}/>
+                      </div>
+                      <div className="tile-meta">
+                        <div className="tile-name">{item.name}</div>
+                        <div className="tile-num">{item.wearCount}×</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty" style={{padding:"48px 0"}}>
+                  <div className="empty-mark">∅</div>
+                  <p className="type-italic" style={{fontSize:18,color:"var(--graphite)"}}>No {activeCat.toLowerCase()} yet.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ─── WEEK ─── */}
+        {tab === "week" && (
+          <div className="fade-up">
+            <div className="section">
+              <div className="editorial-head">
+                <div>
+                  <div className="numeral">№ 03</div>
+                  <h2 className="type-headline" style={{marginTop:6}}>Seven days,<br/><span className="type-italic">composed.</span></h2>
+                </div>
+              </div>
+            </div>
+
+            {weather?.week && (
+              <div style={{padding:"0 var(--s-5)"}}>
+                <div className="forecast">
+                  {weather.week.slice(0,7).map((d, i) => (
+                    <div key={i} className="forecast-day">
+                      <div className="forecast-name">{d.day}</div>
+                      <div className="forecast-hi">{d.high}°</div>
+                      <div className="forecast-lo">{d.low}°</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="section">
+              <button className="btn btn-block btn-dark" onClick={getWeekPlan} disabled={loadingWeek}>
+                {loadingWeek ? (
+                  <>
+                    <span className="loader"><span className="loader-dot"/><span className="loader-dot"/><span className="loader-dot"/></span>
+                    <span>Planning</span>
+                  </>
+                ) : <span>Plan the Week</span>}
+              </button>
+
+              {weekPlan?.days?.map((d, i) => (
+                <div key={i} className="day-card stagger">
+                  <div>
+                    <div className="day-head">
+                      <div className="day-name">{d.day}</div>
+                      <div className="day-mood">{d.mood}</div>
+                    </div>
+                    <div className="day-pieces">
+                      {Object.values(d.outfit || {}).filter(Boolean).map((v, j, arr) => (
+                        <span key={j}>
+                          {v}{j < arr.length - 1 && <span className="sep">·</span>}
+                        </span>
+                      ))}
+                    </div>
+                    {d.note && <div className="day-note">— {d.note}</div>}
+                  </div>
                 </div>
               ))}
-              <p className="philosophy">📖 {weekPlan.philosophy}</p>
-            </div>
-          )}
-        </section>
-      )}
 
-      {tab === 'look' && (
-        <section className="look">
-          <h2>Your Profile</h2>
-          <input ref={photoInputRef} type="file" accept="image/*" onChange={e => handleUserPhoto(e.target.files[0])} hidden />
-          <button onClick={() => photoInputRef.current?.click()}>
-            {userPhoto ? 'Change Photo' : 'Add Photo'}
-          </button>
-          {userPhoto && <img src={userPhoto} alt="You" className="user-photo" />}
-          {history.length > 0 && (
-            <div className="history">
-              <h3>Recent Looks</h3>
-              {history.slice(0, 10).map(h => (
-                <div key={h.id} className="history-item">
-                  <p>{new Date(h.date).toLocaleDateString()} — {h.mood}</p>
-                  <small>{Object.values(h.outfit).filter(Boolean).join(', ')}</small>
+              {weekPlan?.philosophy && (
+                <div className="mood-mark" style={{marginTop:32}}>
+                  <div className="mood-sub" style={{marginBottom:12}}>The Week's Philosophy</div>
+                  <p className="type-italic" style={{fontSize:20,lineHeight:1.5,color:"var(--graphite)"}}>{weekPlan.philosophy}</p>
                 </div>
-              ))}
-            </div>
-          )}
-          <button className="danger" onClick={clearAllData}>Clear All Data</button>
-        </section>
-      )}
+              )}
 
-      {toastMsg && <div className="toast">{toastMsg}</div>}
+              {!weekPlan && !loadingWeek && (
+                <div className="empty" style={{padding:"48px 0 0"}}>
+                  <div className="empty-mark">◈</div>
+                  <p className="type-italic" style={{fontSize:18,color:"var(--graphite)",marginBottom:8}}>Five pieces, minimum.</p>
+                  <p className="type-caption">You have {wardrobe.length}.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ─── HISTORY ─── */}
+        {tab === "history" && (
+          <div className="fade-up">
+            <div className="section">
+              <div className="editorial-head">
+                <div>
+                  <div className="numeral">№ 04</div>
+                  <h2 className="type-headline" style={{marginTop:6}}>The <span className="type-italic">Archive</span><br/>of looks.</h2>
+                </div>
+              </div>
+            </div>
+
+            <div className="section">
+              {history.length > 0 ? (
+                <div className="stagger">
+                  {history.map((h, i) => (
+                    <div key={i} className="day-card">
+                      <div className="day-head">
+                        <div className="day-name" style={{fontSize:24}}>{h.mood}</div>
+                        <div style={{textAlign:"right"}}>
+                          <div className="type-meta" style={{color:"var(--stone)",fontSize:9}}>
+                            {new Date(h.date).toLocaleDateString("en", {month:"short",day:"numeric"})}
+                          </div>
+                          {h.weather && (
+                            <div className="type-italic" style={{fontSize:11,color:"var(--ochre)",marginTop:2}}>
+                              {h.weather.temp}° · {h.weather.label}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="day-pieces">
+                        {Object.values(h.outfit || {}).filter(Boolean).map((v, j, arr) => (
+                          <span key={j}>{v}{j < arr.length - 1 && <span className="sep">·</span>}</span>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="empty">
+                  <div className="empty-mark">◌</div>
+                  <h3 className="empty-title">The archive is empty.</h3>
+                  <p className="empty-body">Compose your first look to begin.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ─── PROFILE ─── */}
+        {tab === "profile" && (
+          <div className="fade-up">
+            <div className="section">
+              <div className="editorial-head">
+                <div>
+                  <div className="numeral">№ 05</div>
+                  <h2 className="type-headline" style={{marginTop:6}}>The <span className="type-italic">subject.</span></h2>
+                </div>
+              </div>
+            </div>
+
+            <div className="section">
+              <label className="profile-photo-wrap" style={{cursor:"pointer", display:"block"}}>
+                <input className="upload-input" type="file" accept="image/*" onChange={e => handleUserPhoto(e.target.files[0])}/>
+                {userPhoto ? (
+                  <img src={userPhoto.url} alt="You" className="profile-photo"/>
+                ) : (
+                  <div className="profile-placeholder">
+                    <div className="profile-placeholder-mark">{uploading ? "◌" : "+"}</div>
+                  </div>
+                )}
+              </label>
+              <p className="text-center type-caption" style={{marginBottom:24}}>Tap to {userPhoto ? "change" : "upload"} · Used by AI for personalized videos</p>
+
+              <div className="stats">
+                <div className="stat">
+                  <div className="stat-num">{wardrobe.length}</div>
+                  <div className="stat-label">Pieces</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-num">{totalWears}</div>
+                  <div className="stat-label">Wears</div>
+                </div>
+                <div className="stat">
+                  <div className="stat-num">{history.length}</div>
+                  <div className="stat-label">Looks</div>
+                </div>
+              </div>
+
+              <div style={{marginBottom:24}}>
+                <div className="divider"><span className="divider-label">Privacy</span></div>
+                <p className="type-body" style={{color:"var(--graphite)",fontSize:15,lineHeight:1.6,marginBottom:16}}>
+                  Your wardrobe, your photo, your history — all stored locally in this browser. Nothing syncs. Nothing tracks.
+                </p>
+                <button className="btn-text" onClick={clearAllData} style={{color:"var(--rust)"}}>
+                  Clear all data →
+                </button>
+              </div>
+
+              <div style={{marginBottom:24}}>
+                <div className="divider"><span className="divider-label">Weather</span></div>
+                <p className="type-body" style={{color:"var(--graphite)",fontSize:15,marginBottom:8}}>
+                  {weather ? <><span className="type-italic">{weather.label}</span> · {weather.temp}°C · {locationName || "Live"}</> : "Locating..."}
+                </p>
+                <button className="btn-text" onClick={getLocation}>Refresh location →</button>
+              </div>
+
+              <div>
+                <div className="divider"><span className="divider-label">Powered By</span></div>
+                <div className="type-body" style={{color:"var(--graphite)",fontSize:14,lineHeight:1.7}}>
+                  <div style={{marginBottom:6}}><span className="numeral">i.</span> Anthropic Claude — Style intelligence</div>
+                  <div style={{marginBottom:6}}><span className="numeral">ii.</span> ByteDance Seedance — Cinematic video</div>
+                  <div><span className="numeral">iii.</span> Open-Meteo — Real-time weather</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div style={{height: 80}}/>
+
+        {/* MODAL */}
+        {selectedItem && (
+          <div className="modal-backdrop" onClick={() => setSelectedItem(null)}>
+            <div className="modal" onClick={e => e.stopPropagation()}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:16}}>
+                <div className="numeral">Item details</div>
+                <button onClick={() => setSelectedItem(null)} style={{fontFamily:"var(--serif)",fontStyle:"italic",fontSize:24,color:"var(--ink)",lineHeight:1}}>×</button>
+              </div>
+              <img src={selectedItem.url} alt={selectedItem.name} style={{width:"100%",aspectRatio:"3/4",objectFit:"cover",marginBottom:20,border:"0.5px solid var(--ash)"}}/>
+              <h3 className="type-title type-italic" style={{marginBottom:12}}>{selectedItem.name}</h3>
+              <div className="composition-row">
+                <span className="composition-num">i.</span>
+                <span className="composition-label">Category</span>
+                <span className="composition-name">{selectedItem.categoryLabel}</span>
+              </div>
+              <div className="composition-row">
+                <span className="composition-num">ii.</span>
+                <span className="composition-label">Worn</span>
+                <span className="composition-name">{selectedItem.wearCount} times</span>
+              </div>
+              {selectedItem.lastWorn && (
+                <div className="composition-row">
+                  <span className="composition-num">iii.</span>
+                  <span className="composition-label">Last</span>
+                  <span className="composition-name">{selectedItem.lastWorn}</span>
+                </div>
+              )}
+              <div style={{marginTop:24}}>
+                <button className="btn btn-block" onClick={() => removeItem(selectedItem)} style={{borderColor:"var(--rust)",color:"var(--rust)"}}>
+                  <span>Remove from wardrobe</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

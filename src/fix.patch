@@ -1,0 +1,23 @@
+--- a/Vestia.jsx
++++ b/Vestia.jsx
+@@ -weather fallback@@
+           async (err) => {
+             console.error("Geolocation denied", err);
+-            // Fallback: use IP-based location approximation (New York as default)
++            // Fallback: try IP geolocation first, then Casablanca as default
+             try {
+-              const w = await fetchWeather(40.7128, -74.0060);
+-              setWeather(w);
+-              setLocationName("New York");
+-              toast("Using default location — enable GPS for local weather");
++              const ipGeo = await fetch("https://ipapi.co/json/").then(r => r.json()).catch(() => null);
++              const lat = ipGeo?.latitude || 33.5731;
++              const lon = ipGeo?.longitude || -7.5898;
++              const city = ipGeo?.city || "Casablanca";
++              const w = await fetchWeather(lat, lon);
++              setWeather(w);
++              setLocationName(city);
++              toast("Using approximate location — enable GPS for local weather");
+             } catch (e) {
+               toast("Weather unavailable");
+             }
