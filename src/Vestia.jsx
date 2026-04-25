@@ -377,4 +377,173 @@ export default function Vestia() {
     toast("All data cleared"); haptic(50);
   }
 
-  const filtered = wardrobe.filter((i) => i.categoryLabel === act
+  const filtered = wardrobe.filter((i) => i.categoryLabel === activeCat);
+
+  // ─── RENDER ───
+  if (!onboarded) {
+    return (
+      <div className="onboard-screen">
+        <div className="onboard-card">
+          <p className="onboard-eyebrow">{steps[onboardStep].eyebrow}</p>
+          <h1>{steps[onboardStep].title}</h1>
+          <p>{steps[onboardStep].body}</p>
+          <div className="onboard-dots">
+            {steps.map((_, i) => (
+              <span key={i} className={`dot ${i === onboardStep ? 'active' : ''}`} />
+            ))}
+          </div>
+          <button onClick={() => {
+            if (onboardStep < steps.length - 1) setOnboardStep(onboardStep + 1);
+            else finishOnboarding();
+          }}>
+            {onboardStep < steps.length - 1 ? 'Next' : 'Get Started'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app">
+      <header>
+        <h1>VESTIA</h1>
+        <p className="date">{TODAY_ISSUE} {locationName && `· ${locationName}`}</p>
+        {weather && (
+          <div className="weather-bar">
+            <span>{weather.temp}°C feels {weather.feel}°C</span>
+            <span>{weather.label} · 💧{weather.humidity}% · 💨{weather.wind}km/h</span>
+          </div>
+        )}
+      </header>
+
+      <nav className="tabs">
+        {['today', 'wardrobe', 'week', 'look'].map(t => (
+          <button key={t} className={tab === t ? 'active' : ''} onClick={() => { setTab(t); haptic(5); }}>
+            {t.charAt(0).toUpperCase() + t.slice(1)}
+          </button>
+        ))}
+      </nav>
+
+      {tab === 'today' && (
+        <section className="today">
+          {!suggestion && !loading && (
+            <button className="generate-btn" onClick={generateOutfit}>Compose Today's Look</button>
+          )}
+          {loading && <p className="loading">Composing your look...</p>}
+          {suggestion?.error && <p className="error">{suggestion.message}</p>}
+          {suggestion && !suggestion.error && (
+            <div className="suggestion-card">
+              <h2>{suggestion.mood} · {suggestion.occasion}</h2>
+              <div className="outfit-grid">
+                {Object.entries(suggestion.outfit).map(([cat, item]) => (
+                  <div key={cat} className="outfit-slot">
+                    <label>{cat}</label>
+                    <p>{item || '—'}</p>
+                  </div>
+                ))}
+              </div>
+              <p className="reasoning">{suggestion.reasoning}</p>
+              <p className="color-story">🎨 {suggestion.colorStory}</p>
+              <div className="scores">
+                <span>Style: {suggestion.styleScore}/100</span>
+                <span>Weather: {suggestion.weatherScore}/100</span>
+              </div>
+              {suggestion.tips && (
+                <ul className="tips">{suggestion.tips.map((t, i) => <li key={i}>{t}</li>)}</ul>
+              )}
+              <button onClick={handleGenerateVideo}>Generate Look Video</button>
+              {sdVideo && <video src={sdVideo} controls className="sd-video" />}
+              {sdError && <p className="error">{sdError}</p>}
+            </div>
+          )}
+        </section>
+      )}
+
+      {tab === 'wardrobe' && (
+        <section className="wardrobe">
+          <div className="wardrobe-header">
+            <div className="cat-tabs">
+              {CATS.map(cat => (
+                <button key={cat} className={activeCat === cat ? 'active' : ''} onClick={() => setActiveCat(cat)}>
+                  {cat}
+                </button>
+              ))}
+            </div>
+            <input ref={fileInputRef} type="file" accept="image/*" multiple onChange={e => handleClothingUpload(e.target.files)} />
+            <button onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+              {uploading ? 'Uploading...' : '+ Add Items'}
+            </button>
+          </div>
+          <div className="wardrobe-grid">
+            {filtered.length === 0 && <p className="empty">No items in {activeCat}</p>}
+            {filtered.map(item => (
+              <div key={item.id} className={`item-card ${selectedItem?.id === item.id ? 'selected' : ''}`} onClick={() => setSelectedItem(item)}>
+                <img src={item.photo} alt={item.name} />
+                <p>{item.name}</p>
+                <small>Worn: {item.wearCount}x</small>
+              </div>
+            ))}
+          </div>
+          {selectedItem && (
+            <div className="item-detail">
+              <h3>{selectedItem.name}</h3>
+              <p>{selectedItem.categoryLabel} · {selectedItem.color} · {selectedItem.material}</p>
+              <p>{selectedItem.formality} · {selectedItem.season}</p>
+              <p>{selectedItem.notes}</p>
+              <button onClick={() => setSelectedItem(null)}>Close</button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {tab === 'week' && (
+        <section className="week">
+          <button onClick={generateWeekPlan} disabled={loadingWeek}>
+            {loadingWeek ? 'Planning...' : 'Generate Week Plan'}
+          </button>
+          {weekPlan && (
+            <div className="week-grid">
+              {weekPlan.days.map((day, i) => (
+                <div key={i} className="day-card">
+                  <h3>{day.day}</h3>
+                  <div className="outfit-mini">
+                    {Object.entries(day.outfit).map(([cat, item]) => (
+                      <p key={cat}><strong>{cat}:</strong> {item || '—'}</p>
+                    ))}
+                  </div>
+                  <p className="note">{day.note}</p>
+                </div>
+              ))}
+              <p className="philosophy">📖 {weekPlan.philosophy}</p>
+            </div>
+          )}
+        </section>
+      )}
+
+      {tab === 'look' && (
+        <section className="look">
+          <h2>Your Profile</h2>
+          <input ref={photoInputRef} type="file" accept="image/*" onChange={e => handleUserPhoto(e.target.files[0])} hidden />
+          <button onClick={() => photoInputRef.current?.click()}>
+            {userPhoto ? 'Change Photo' : 'Add Photo'}
+          </button>
+          {userPhoto && <img src={userPhoto} alt="You" className="user-photo" />}
+          {history.length > 0 && (
+            <div className="history">
+              <h3>Recent Looks</h3>
+              {history.slice(0, 10).map(h => (
+                <div key={h.id} className="history-item">
+                  <p>{new Date(h.date).toLocaleDateString()} — {h.mood}</p>
+                  <small>{Object.values(h.outfit).filter(Boolean).join(', ')}</small>
+                </div>
+              ))}
+            </div>
+          )}
+          <button className="danger" onClick={clearAllData}>Clear All Data</button>
+        </section>
+      )}
+
+      {toastMsg && <div className="toast">{toastMsg}</div>}
+    </div>
+  );
+}
