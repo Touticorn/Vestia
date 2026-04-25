@@ -247,7 +247,7 @@ Reply ONLY with valid JSON (no markdown, no backticks):
         contents: [{ role: "user", parts }],
         generationConfig: { temperature: 0.9, maxOutputTokens: 1200, responseMimeType: "application/json" },
       };
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
 
       let data;
       if (window.Capacitor?.isNativePlatform?.()) {
@@ -321,7 +321,7 @@ Reply ONLY with JSON:
         contents: [{ role: "user", parts: [{ text: promptText }] }],
         generationConfig: { temperature: 0.9, maxOutputTokens: 1500, responseMimeType: "application/json" },
       };
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
       let data;
       if (isNative) {
         const resp = await window.Capacitor.Plugins.CapacitorHttp.post({
