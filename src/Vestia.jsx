@@ -302,16 +302,27 @@ JSON only:
       const forecast = weather?.week?.map(d => `${d.day}: ${d.label}, ${d.high}°/${d.low}°C`).join("\n") || "Mild week";
 
       const isNative = window.Capacitor?.isNativePlatform?.();
-      const promptText = `Stylist. Plan 7 outfits. Each item max 2x.
-Forecast:
+      const promptText = `You are a personal stylist creating a 7-day outfit plan.
+
+STRICT RULES:
+1. NO two days can have the EXACT SAME combination of top + bottom + shoes
+2. Rotate items — if used on SAT, don't reuse until WED at earliest
+3. Each item MAX 2 times across the whole week
+4. Vary mood and occasion each day — no same vibe two days in a row
+5. Only repeat outerwear if forecast demands it (cold/rain)
+6. If wardrobe is limited, mix items differently
+
+FORECAST:
 ${forecast}
-Wardrobe:
+
+WARDROBE (describe items visually, NOT filenames):
 ${desc}
-JSON only:
-{"days":[{"day":"MON","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"word","note":"short"}],"philosophy":"1 sentence"}`;
+
+JSON only, no markdown:
+{"days":[{"day":"SAT","outfit":{"top":"visual description","bottom":"visual description","shoes":"visual description","outerwear":null},"mood":"one word","note":"one sentence"},{"day":"SUN","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"MON","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"TUE","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"WED","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"THU","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"FRI","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""}],"philosophy":"one sentence"}`;
       const reqBody = {
         contents: [{ role: "user", parts: [{ text: promptText }] }],
-        generationConfig: { temperature: 0.9, maxOutputTokens: 2500, responseMimeType: "application/json" },
+        generationConfig: { temperature: 1.2, maxOutputTokens: 3000, responseMimeType: "application/json" },
       };
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
       let data;
