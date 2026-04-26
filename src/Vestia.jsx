@@ -371,11 +371,11 @@ JSON only, no markdown:
         });
         const imgUrl = result.data?.images?.[0]?.url;
         if (imgUrl) return { url: imgUrl, source: "FLUX.2" };
-      } catch (e) { console.log("FLUX.2 failed:", e); showToast("FLUX.2 error: " + e.message, "error"); }
+      } catch (e) { setSdError("FLUX.2: " + (e.message || JSON.stringify(e)).slice(0,200)); }
     }
     const prompt = `High-fashion editorial photo, stylish person wearing ${pieces}. ${mood || "elegant"} style. Soft lighting, minimal background, magazine quality`;
     const seed = Math.floor(Math.random() * 1000000);
-    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=1024&seed=${seed}&nologo=true&model=flux`;
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=1024&seed=${seed}&nologo=true&enhance=true&model=flux`;
     return { url, source: "Pollinations" };
   };
 
@@ -419,14 +419,14 @@ JSON only, no markdown:
             setSdStatus(""); showToast("Photo ready (Gemini)", "success");
             haptic([20,50,20,50,20]); setSdLoading(false); return;
           }
-        } catch (e) { console.log("Gemini failed:", e.message); }
+        } catch (e) { setSdError("Gemini: " + (e.message || "unknown").slice(0,100)); }
       }
 
       // Tier 2 & 3: FLUX.2 edit or Pollinations
-      setSdStatus("Trying FLUX.2...");
+      setSdStatus("Gemini failed, trying FLUX.2...");
       const { url: imgUrl, source } = await generateWithFallback(pieces, mood, userPhoto);
       setSdVideo(imgUrl);
-      setSdStatus(""); showToast(`Photo ready (${source})`, "success");
+      setSdStatus(""); showToast(`Photo: ${source}`, "success"); setSdStatus(`Used: ${source}`);
       haptic([20,50,20,50,20]);
     } catch (e) {
       setSdError(e.message || "Photo generation failed");
