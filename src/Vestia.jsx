@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { fal } from "@fal-ai/client";
 
 const GEMINI_KEY = import.meta.env.VITE_GEMINI_KEY || "";
+const FAL_KEY_VAL = import.meta.env.VITE_FAL_KEY || "";
+if (FAL_KEY_VAL) fal.config({ credentials: FAL_KEY_VAL });
 
 // ─── CONSTANTS ──────────────────────────────────────────────────
 const WMO_LABEL = {0:"Clear",1:"Mainly Clear",2:"Partly Cloudy",3:"Overcast",45:"Foggy",48:"Icy Fog",51:"Light Drizzle",53:"Drizzle",55:"Heavy Drizzle",61:"Light Rain",63:"Rain",65:"Heavy Rain",71:"Light Snow",73:"Snow",75:"Heavy Snow",77:"Snow Grains",80:"Showers",81:"Showers",82:"Heavy Showers",85:"Snow Showers",86:"Snow Showers",95:"Thunder",96:"Thunder",99:"Thunder"};
@@ -358,72 +361,74 @@ JSON only, no markdown:
   };
 
   // ─── Video generation ───────────────────────────────────────────
+
+  const generateWithFallback = async (pieces, mood, userPhotoRef) => {
+    if (FAL_KEY_VAL && userPhotoRef) {
+      try {
+        const prompt = `Change the outfit to: ${pieces}. ${mood || "elegant"} editorial fashion style. Full body shot, soft natural lighting, minimal background, magazine quality. Keep exact face and identity from reference.`;
+        const result = await fal.subscribe("fal-ai/flux-2/edit", {
+          input: { prompt, image_url: userPhotoRef.url, num_inference_steps: 28, guidance_scale: 3.5, enable_safety_checker: true },
+        });
+        const imgUrl = result.data?.images?.[0]?.url;
+        if (imgUrl) return { url: imgUrl, source: "FLUX.2" };
+      } catch (e) { console.log("FLUX.2 failed:", e.message); }
+    }
+    const prompt = `High-fashion editorial photo, stylish person wearing ${pieces}. ${mood || "elegant"} style. Soft lighting, minimal background, magazine quality`;
+    const seed = Math.floor(Math.random() * 1000000);
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=768&height=1024&seed=${seed}&nologo=true&model=flux`;
+    return { url, source: "Pollinations" };
+  };
+
   const generatePhoto = async () => {
     if (!suggestion?.outfit) return;
+    if (!userPhoto) return showToast("Add profile photo first", "error");
     setSdLoading(true); setSdVideo(null); setSdError(null);
-    setSdStatus("Generating photo..."); haptic(15);
-
-    const o = suggestion.outfit || {};
-    const pieces = Object.values(o).filter(Boolean).join(", ");
-    const mood = suggestion.mood || "elegant";
-    const occasion = suggestion.occasion || "editorial";
-    const colorStory = suggestion.colorStory || "";
-
-    // Try Gemini first (with face) - works while you have free quota
-    if (userPhoto && GEMINI_KEY) {
-      try {
-        setSdStatus("Trying with your face...");
-        const promptText = `High-fashion editorial photo of person from reference wearing: ${pieces}. Full body, soft lighting, minimal background, magazine quality. Keep exact face and identity from reference.`;
-        const reqBody = {
-          contents: [{ role: "user", parts: [
-            { inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } },
-            { text: promptText },
-          ]}],
-          generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
-        };
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${GEMINI_KEY}`;
-        let data;
-        if (window.Capacitor?.isNativePlatform?.()) {
-          const resp = await window.Capacitor.Plugins.CapacitorHttp.post({
-            url, headers: { "Content-Type": "application/json" }, data: reqBody,
-          });
-          if (resp.status >= 400) throw new Error(`Gemini quota exceeded`);
-          data = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
-        } else {
-          const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(reqBody) });
-          if (!res.ok) throw new Error(`Gemini quota exceeded`);
-          data = await res.json();
-        }
-        const parts = data.candidates?.[0]?.content?.parts || [];
-        const imagePart = parts.find(p => p.inlineData || p.inline_data);
-        const imgData = imagePart?.inlineData?.data || imagePart?.inline_data?.data;
-        const mime = imagePart?.inlineData?.mimeType || imagePart?.inline_data?.mime_type || "image/png";
-        if (imgData) {
-          setSdVideo(`data:${mime};base64,${imgData}`);
-          setSdStatus("");
-          showToast("Photo with your face ready", "success");
-          haptic([20,50,20,50,20]);
-          setSdLoading(false);
-          return;
-        }
-      } catch (e) {
-        console.log("Gemini failed, falling back:", e.message);
-      }
-    }
-
-    // Fallback: Pollinations.ai (free unlimited, no face preservation)
+    setSdStatus("Generating..."); haptic(15);
     try {
-      setSdStatus("Generating fashion photo...");
-      const promptText = `High-fashion editorial photograph, full body shot of a stylish person wearing ${pieces}. ${mood} ${occasion} aesthetic. ${colorStory} Professional fashion photography, soft natural lighting, minimal background, magazine quality, sharp focus, 8k`;
-      const seed = Math.floor(Math.random() * 1000000);
-      const encodedPrompt = encodeURIComponent(promptText);
-      const url = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=768&height=1024&seed=${seed}&nologo=true&model=flux`;
-      setSdVideo(url);
-      setSdStatus("");
-      showToast("Photo ready (no face match)", "success");
+      const o = suggestion.outfit || {};
+      const pieces = Object.values(o).filter(Boolean).join(", ");
+      const mood = suggestion.mood || "elegant";
+
+      // Tier 1: Gemini with face
+      if (GEMINI_KEY) {
+        try {
+          const reqBody = {
+            contents: [{ role: "user", parts: [
+              { inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } },
+              { text: `Editorial photo of person from reference wearing: ${pieces}. ${mood} style. Full body, soft lighting, minimal background. Keep exact face from reference.` },
+            ]}],
+            generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
+          };
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent?key=${GEMINI_KEY}`;
+          let data;
+          if (window.Capacitor?.isNativePlatform?.()) {
+            const resp = await window.Capacitor.Plugins.CapacitorHttp.post({ url, headers: { "Content-Type": "application/json" }, data: reqBody });
+            if (resp.status >= 400) throw new Error("quota");
+            data = typeof resp.data === "string" ? JSON.parse(resp.data) : resp.data;
+          } else {
+            const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(reqBody) });
+            if (!res.ok) throw new Error("quota");
+            data = await res.json();
+          }
+          const parts = data.candidates?.[0]?.content?.parts || [];
+          const imagePart = parts.find(p => p.inlineData || p.inline_data);
+          const imgData = imagePart?.inlineData?.data || imagePart?.inline_data?.data;
+          const mime = imagePart?.inlineData?.mimeType || imagePart?.inline_data?.mime_type || "image/png";
+          if (imgData) {
+            setSdVideo(`data:${mime};base64,${imgData}`);
+            setSdStatus(""); showToast("Photo ready (Gemini)", "success");
+            haptic([20,50,20,50,20]); setSdLoading(false); return;
+          }
+        } catch (e) { console.log("Gemini failed:", e.message); }
+      }
+
+      // Tier 2 & 3: FLUX.2 edit or Pollinations
+      setSdStatus("Trying FLUX.2...");
+      const { url: imgUrl, source } = await generateWithFallback(pieces, mood, userPhoto);
+      setSdVideo(imgUrl);
+      setSdStatus(""); showToast(`Photo ready (${source})`, "success");
       haptic([20,50,20,50,20]);
     } catch (e) {
-      console.error(e);
       setSdError(e.message || "Photo generation failed");
       showToast("Photo failed", "error");
     }
