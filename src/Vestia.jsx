@@ -298,30 +298,31 @@ JSON only:
     if (wardrobe.length < 5) return showToast("Add 5+ pieces first", "error");
     setLoadingWeek(true); setWeekPlan(null); haptic(15);
     try {
-      const desc = wardrobe.map((i, x) => `[${x+1}] ${i.categoryLabel}: "${i.name}"`).join("\n");
+      const desc = wardrobe.map((i, x) => `[${x+1}] ${i.categoryLabel} (index:${x})`).join("\n");
       const forecast = weather?.week?.map(d => `${d.day}: ${d.label}, ${d.high}°/${d.low}°C`).join("\n") || "Mild week";
 
       const isNative = window.Capacitor?.isNativePlatform?.();
-      const promptText = `You are a personal stylist creating a 7-day outfit plan.
+      const promptText = `You are a personal stylist. The images show my wardrobe items numbered [0] to [${wardrobe.length-1}].
 
 STRICT RULES:
-1. NO two days can have the EXACT SAME combination of top + bottom + shoes
-2. Rotate items — if used on SAT, don't reuse until WED at earliest
-3. Each item MAX 2 times across the whole week
-4. Vary mood and occasion each day — no same vibe two days in a row
-5. Only repeat outerwear if forecast demands it (cold/rain)
-6. If wardrobe is limited, mix items differently
+1. NO two days can have the EXACT SAME combination
+2. Each item index can appear MAX 2 times across the whole week
+3. Vary mood each day — no same vibe two days in a row
+4. Only use outerwear index if forecast is cold or rainy
+5. Mix items differently each day
 
 FORECAST:
 ${forecast}
 
-WARDROBE (describe items visually, NOT filenames):
+WARDROBE CATEGORIES (images sent in same order):
 ${desc}
 
+Return the INDEX NUMBER of the chosen item for each slot.
 JSON only, no markdown:
-{"days":[{"day":"SAT","outfit":{"top":"visual description","bottom":"visual description","shoes":"visual description","outerwear":null},"mood":"one word","note":"one sentence"},{"day":"SUN","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"MON","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"TUE","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"WED","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"THU","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""},{"day":"FRI","outfit":{"top":"","bottom":"","shoes":"","outerwear":null},"mood":"","note":""}],"philosophy":"one sentence"}`;
+{"days":[{"day":"SAT","outfitIdx":{"top":0,"bottom":1,"shoes":2,"outerwear":null},"mood":"one word","note":"one sentence"},{"day":"SUN","outfitIdx":{"top":0,"bottom":1,"shoes":2,"outerwear":null},"mood":"","note":""},{"day":"MON","outfitIdx":{"top":0,"bottom":1,"shoes":2,"outerwear":null},"mood":"","note":""},{"day":"TUE","outfitIdx":{"top":0,"bottom":1,"shoes":2,"outerwear":null},"mood":"","note":""},{"day":"WED","outfitIdx":{"top":0,"bottom":1,"shoes":2,"outerwear":null},"mood":"","note":""},{"day":"THU","outfitIdx":{"top":0,"bottom":1,"shoes":2,"outerwear":null},"mood":"","note":""},{"day":"FRI","outfitIdx":{"top":0,"bottom":1,"shoes":2,"outerwear":null},"mood":"","note":""}],"philosophy":"one sentence"}`;
+      const wardrobeParts = wardrobe.slice(0, 8).map(i => ({ inline_data: { mime_type: i.mediaType, data: i.base64 } }));
       const reqBody = {
-        contents: [{ role: "user", parts: [{ text: promptText }] }],
+        contents: [{ role: "user", parts: [...wardrobeParts, { text: promptText }] }],
         generationConfig: { temperature: 1.2, maxOutputTokens: 3000, responseMimeType: "application/json" },
       };
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${GEMINI_KEY}`;
@@ -844,24 +845,25 @@ JSON only, no markdown:
                       <div className="day-mood">{d.mood}</div>
                     </div>
                     <div style={{display:"flex",gap:8,marginTop:10,marginBottom:10,flexWrap:"wrap"}}>
-                      {Object.entries(d.outfit || {}).filter(([,v])=>v).map(([part, val], j) => {
+                      {Object.entries(d.outfitIdx || d.outfit || {}).filter(([,v])=>v!=null).map(([part, val], j) => {
+                        const item = typeof val === "number" ? wardrobe[val] : null;
                         const partToCat = { top: "tops", bottom: "bottoms", shoes: "shoes", outerwear: "outerwear", accessories: "accessories" };
-                        const catKey = partToCat[part];
-                        const matches = wardrobe.filter(w => w.category === catKey);
-                        const thumb = matches[0];
-                        return thumb ? (
-                          <img key={j} src={thumb.url} alt={part} title={val} style={{width:44,height:54,objectFit:"cover",border:"0.5px solid var(--ash)"}}/>
+                        const fallback = item || wardrobe.filter(w => w.category === partToCat[part])[0];
+                        return fallback ? (
+                          <img key={j} src={fallback.url} alt={part} title={part} style={{width:44,height:54,objectFit:"cover",border:"0.5px solid var(--ash)"}}/>
                         ) : (
                           <div key={j} style={{width:44,height:54,border:"0.5px solid var(--ash)"}}/>
                         );
                       })}
                     </div>
                     <div className="day-pieces" style={{fontSize:11}}>
-                      {Object.values(d.outfit || {}).filter(Boolean).map((v, j, arr) => (
-                        <span key={j}>
-                          {v}{j < arr.length - 1 && <span className="sep">·</span>}
-                        </span>
-                      ))}
+                      {Object.entries(d.outfitIdx || d.outfit || {}).filter(([,v])=>v!=null).map(([part, val], j, arr) => {
+                        const item = typeof val === "number" ? wardrobe[val] : null;
+                        const label = item ? item.categoryLabel : part;
+                        return (
+                          <span key={j}>{label}{j < arr.length - 1 && <span className="sep">·</span>}</span>
+                        );
+                      })}
                     </div>
                     {d.note && <div className="day-note">— {d.note}</div>}
                     {dayPhotos[i] && (
