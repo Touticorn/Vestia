@@ -371,7 +371,7 @@ JSON only, no markdown:
         });
         const imgUrl = result.data?.images?.[0]?.url;
         if (imgUrl) return { url: imgUrl, source: "FLUX.2" };
-      } catch (e) { console.log("FLUX.2 failed:", e.message); }
+      } catch (e) { console.log("FLUX.2 failed:", e); showToast("FLUX.2 error: " + e.message, "error"); }
     }
     const prompt = `High-fashion editorial photo, stylish person wearing ${pieces}. ${mood || "elegant"} style. Soft lighting, minimal background, magazine quality`;
     const seed = Math.floor(Math.random() * 1000000);
