@@ -392,10 +392,19 @@ JSON only, no markdown:
       // Tier 1: Gemini with face
       if (GEMINI_KEY) {
         try {
+          // Send user photo + wardrobe item photos to Gemini
+          const outfitPartsG = Object.keys(suggestion.outfit || {}).filter(k => suggestion.outfit[k]);
+          const wardrobeImgParts = outfitPartsG.map(part => {
+            const catMap = { top: "tops", bottom: "bottoms", shoes: "shoes", outerwear: "outerwear", accessories: "accessories" };
+            return wardrobe.filter(w => w.category === catMap[part])[0];
+          }).filter(Boolean).slice(0, 4).map(item => ({
+            inline_data: { mime_type: item.mediaType, data: item.base64 }
+          }));
           const reqBody = {
             contents: [{ role: "user", parts: [
               { inline_data: { mime_type: userPhoto.mediaType, data: userPhoto.base64 } },
-              { text: `Editorial photo of person from reference wearing: ${pieces}. ${mood} style. Full body, soft lighting, minimal background. Keep exact face from reference.` },
+              ...wardrobeImgParts,
+              { text: `First image is the person. Remaining images are the EXACT clothing items to wear. Create an editorial photo of the person wearing ONLY these specific garments — do not invent or substitute any clothing. ${mood} style. Full body, soft lighting, minimal background. Keep exact face from first image.` },
             ]}],
             generationConfig: { responseModalities: ["IMAGE", "TEXT"] },
           };
@@ -422,9 +431,14 @@ JSON only, no markdown:
         } catch (e) { setSdError("Gemini: " + (e.message || "unknown").slice(0,100)); }
       }
 
-      // Tier 2 & 3: FLUX.2 edit or Pollinations
+      // Tier 2 & 3: FLUX.2 edit or Pollinations — pass actual wardrobe items
       setSdStatus("Gemini failed, trying FLUX.2...");
-      const { url: imgUrl, source } = await generateWithFallback(pieces, mood, userPhoto);
+      const outfitKeys = Object.keys(suggestion.outfit || {}).filter(k => suggestion.outfit[k]);
+      const outfitItems = outfitKeys.map(part => {
+        const catMap = { top: "tops", bottom: "bottoms", shoes: "shoes", outerwear: "outerwear", accessories: "accessories" };
+        return wardrobe.filter(w => w.category === catMap[part])[0];
+      }).filter(Boolean);
+      const { url: imgUrl, source } = await generateWithFallback(pieces, mood, userPhoto, outfitItems);
       setSdVideo(imgUrl);
       setSdStatus(""); showToast(`Photo: ${source}`, "success"); setSdStatus(`Used: ${source}`);
       haptic([20,50,20,50,20]);
