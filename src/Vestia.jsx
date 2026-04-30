@@ -62,6 +62,8 @@ export default function Vestia() {
 
   const [wardrobe, setWardrobe] = useState([]);
   const [userPhoto, setUserPhoto] = useState(null);
+  const [userPhotos, setUserPhotos] = useState([]); // multi-photo profile
+  const [photoValidations, setPhotoValidations] = useState({}); // {id: {status, reason}}
   const [history, setHistory] = useState([]);
 
   const [tab, setTab] = useState("today");
@@ -93,14 +95,16 @@ export default function Vestia() {
   useEffect(() => {
     (async () => {
       try {
-        const [photos, userPhotoData, historyData, hasOnboarded] = await Promise.all([
+        const [photos, userPhotoData, userPhotosData, historyData, hasOnboarded] = await Promise.all([
           dbGetAll("photos"),
           dbGet("meta", "userPhoto"),
+          dbGet("meta", "userPhotos"),
           dbGet("meta", "history"),
           dbGet("meta", "onboarded"),
         ]);
         setWardrobe(photos.filter(p => p.type === "clothing").sort((a,b) => (b.addedAt||0) - (a.addedAt||0)));
         setUserPhoto(userPhotoData?.value || null);
+        setUserPhotos(userPhotosData?.value || []);
         setHistory(historyData?.value || []);
         if (!hasOnboarded?.value) setShowOnboarding(true);
       } catch(e) { console.error(e); }
@@ -191,18 +195,170 @@ export default function Vestia() {
     setUploading(false);
   };
 
+  // ─── Photo validation (lightweight, no face-api.js needed) ─────
+  const validatePhoto = async (file) => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        try {
+          // Check 1: Resolution
+          if (img.width < 512 || img.height < 512) {
+            URL.revokeObjectURL(url);
+            return resolve({ valid: false, reason: `Resolution too low (${img.width}x${img.height}). Minimum 512x512.` });
+          }
+
+          // Draw to canvas for pixel analysis
+          const canvas = document.createElement("canvas");
+          const size = 256; // analyze at lower res for speed
+          canvas.width = size; canvas.height = size;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, size, size);
+          const data = ctx.getImageData(0, 0, size, size).data;
+
+          // Check 2: Brightness (mean luminance)
+          let lumSum = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            lumSum += 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+          }
+          const meanLum = lumSum / (data.length / 4);
+          if (meanLum < 40) {
+            URL.revokeObjectURL(url);
+            return resolve({ valid: false, reason: "Photo too dark. Try better lighting." });
+          }
+          if (meanLum > 220) {
+            URL.revokeObjectURL(url);
+            return resolve({ valid: false, reason: "Photo overexposed. Avoid bright backlight." });
+          }
+
+          // Check 3: Blur detection via Laplacian variance (simplified)
+          let lapVar = 0, lapMean = 0, count = 0;
+          const w = size;
+          for (let y = 1; y < size - 1; y++) {
+            for (let x = 1; x < size - 1; x++) {
+              const i = (y * w + x) * 4;
+              const center = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+              const top = 0.299*data[i-w*4] + 0.587*data[i-w*4+1] + 0.114*data[i-w*4+2];
+              const bottom = 0.299*data[i+w*4] + 0.587*data[i+w*4+1] + 0.114*data[i+w*4+2];
+              const left = 0.299*data[i-4] + 0.587*data[i-3] + 0.114*data[i-2];
+              const right = 0.299*data[i+4] + 0.587*data[i+5] + 0.114*data[i+6];
+              const lap = Math.abs(top + bottom + left + right - 4 * center);
+              lapMean += lap;
+              count++;
+            }
+          }
+          lapMean /= count;
+          for (let y = 1; y < size - 1; y++) {
+            for (let x = 1; x < size - 1; x++) {
+              const i = (y * w + x) * 4;
+              const center = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+              const top = 0.299*data[i-w*4] + 0.587*data[i-w*4+1] + 0.114*data[i-w*4+2];
+              const bottom = 0.299*data[i+w*4] + 0.587*data[i+w*4+1] + 0.114*data[i+w*4+2];
+              const left = 0.299*data[i-4] + 0.587*data[i-3] + 0.114*data[i-2];
+              const right = 0.299*data[i+4] + 0.587*data[i+5] + 0.114*data[i+6];
+              const lap = Math.abs(top + bottom + left + right - 4 * center);
+              lapVar += (lap - lapMean) ** 2;
+            }
+          }
+          lapVar /= count;
+          if (lapVar < 80) {
+            URL.revokeObjectURL(url);
+            return resolve({ valid: false, reason: `Photo appears blurry (sharpness: ${Math.round(lapVar)}). Use a sharper photo.` });
+          }
+
+          URL.revokeObjectURL(url);
+          resolve({ valid: true, sharpness: Math.round(lapVar), brightness: Math.round(meanLum), width: img.width, height: img.height });
+        } catch (e) {
+          URL.revokeObjectURL(url);
+          resolve({ valid: false, reason: "Validation error: " + e.message });
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve({ valid: false, reason: "Could not load image." });
+      };
+      img.src = url;
+    });
+  };
+
+  // Single photo (legacy single profile pic)
   const handleUserPhoto = async (f) => {
     if (!f?.type.startsWith("image/")) return;
     setUploading(true);
     try {
+      const validation = await validatePhoto(f);
+      if (!validation.valid) {
+        showToast(validation.reason, "error");
+        setUploading(false);
+        return;
+      }
       const { dataUrl, base64, mediaType } = await compressImage(f, 800, 0.88);
       const data = { url: dataUrl, base64, mediaType };
       await dbPut("meta", { key: "userPhoto", value: data });
       setUserPhoto(data);
       haptic(20);
-      showToast("Photo updated", "success");
+      showToast("Photo verified ✓", "success");
     } catch(e) { showToast("Failed to save", "error"); }
     setUploading(false);
+  };
+
+  // Multi-photo upload (3-5 reference photos)
+  const handleUserPhotos = async (files) => {
+    if (!files?.length) return;
+    setUploading(true);
+    const newPhotos = [...userPhotos];
+    const validations = { ...photoValidations };
+    for (const f of Array.from(files)) {
+      if (!f?.type.startsWith("image/")) continue;
+      if (newPhotos.length >= 5) {
+        showToast("Maximum 5 photos", "error");
+        break;
+      }
+      const id = `up_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+      const validation = await validatePhoto(f);
+      if (!validation.valid) {
+        validations[id] = { status: "rejected", reason: validation.reason, name: f.name };
+        showToast(validation.reason, "error");
+        continue;
+      }
+      const { dataUrl, base64, mediaType } = await compressImage(f, 1024, 0.9);
+      const photo = {
+        id,
+        url: dataUrl, base64, mediaType,
+        sharpness: validation.sharpness,
+        brightness: validation.brightness,
+        addedAt: Date.now(),
+      };
+      newPhotos.push(photo);
+      validations[id] = { status: "accepted", ...validation };
+      // Set first valid photo as primary
+      if (!userPhoto) {
+        const data = { url: dataUrl, base64, mediaType };
+        await dbPut("meta", { key: "userPhoto", value: data });
+        setUserPhoto(data);
+      }
+    }
+    setUserPhotos(newPhotos);
+    setPhotoValidations(validations);
+    await dbPut("meta", { key: "userPhotos", value: newPhotos });
+    haptic(20);
+    if (newPhotos.length > 0) showToast(`${newPhotos.length} photo${newPhotos.length>1?"s":""} verified`, "success");
+    setUploading(false);
+  };
+
+  const removeUserPhoto = async (id) => {
+    const filtered = userPhotos.filter(p => p.id !== id);
+    setUserPhotos(filtered);
+    await dbPut("meta", { key: "userPhotos", value: filtered });
+    if (filtered.length > 0 && userPhoto?.url === userPhotos.find(p => p.id === id)?.url) {
+      const newPrimary = { url: filtered[0].url, base64: filtered[0].base64, mediaType: filtered[0].mediaType };
+      await dbPut("meta", { key: "userPhoto", value: newPrimary });
+      setUserPhoto(newPrimary);
+    } else if (filtered.length === 0) {
+      await dbPut("meta", { key: "userPhoto", value: null });
+      setUserPhoto(null);
+    }
+    haptic(15);
   };
 
   const removeItem = async (item) => {
@@ -364,9 +520,18 @@ Return ONLY valid JSON, no markdown:
   };
 
   // ─── Photo generation ───────────────────────────────────────────
+  // Helper: upload base64 to fal storage to get public URL
+  const uploadToFal = async (base64Url) => {
+    try {
+      const blob = await fetch(base64Url).then(r => r.blob());
+      const url = await fal.storage.upload(blob);
+      return url;
+    } catch (e) { console.log("fal upload failed:", e); return null; }
+  };
+
   const generatePhoto = async () => {
     if (!suggestion?.outfit) return;
-    if (!userPhoto) return showToast("Add profile photo first", "error");
+    if (!userPhoto && userPhotos.length === 0) return showToast("Add profile photo(s) first", "error");
     setSdLoading(true); setSdVideo(null); setSdError(null); setSdSource("");
     haptic(15);
 
@@ -380,7 +545,92 @@ Return ONLY valid JSON, no markdown:
       .map(part => wardrobe.filter(w => w.category === catMap[part])[0])
       .filter(Boolean);
 
-    // Tier 1: Gemini — sends your face + actual wardrobe photos
+    // All reference photos (multi-photo if available, else single)
+    const refPhotos = userPhotos.length > 0 ? userPhotos.slice(0, 5) : (userPhoto ? [userPhoto] : []);
+
+    // Tier 1: FLUX.2 [pro] edit — supports up to 9 reference images, BEST identity preservation
+    if (FAL_KEY_VAL && refPhotos.length > 0) {
+      try {
+        setSdStatus("Uploading photos...");
+        // Upload all reference photos + outfit items to fal storage
+        const refUrls = [];
+        for (const p of refPhotos) {
+          const u = await uploadToFal(p.url);
+          if (u) refUrls.push(u);
+        }
+        const itemUrls = [];
+        for (const item of outfitItems.slice(0, 4)) {
+          const u = await uploadToFal(item.url);
+          if (u) itemUrls.push(u);
+        }
+        if (refUrls.length === 0) throw new Error("Could not upload reference photos");
+
+        setSdStatus("Generating with FLUX.2 Pro (multi-reference)...");
+        const allRefs = [...refUrls, ...itemUrls];
+        const prompt = `Editorial fashion photograph. The first ${refUrls.length} reference image${refUrls.length>1?"s show":" shows"} the same person — preserve their EXACT face, identity, and features. The remaining ${itemUrls.length} reference image${itemUrls.length===1?" shows":"s show"} the EXACT clothing items they should wear. Generate a full body editorial photo of this person wearing ONLY these specific garments. ${mood} style. Soft natural lighting, minimal clean background, magazine quality.`;
+
+        const result = await fal.subscribe("fal-ai/flux-2-pro/edit", {
+          input: {
+            prompt,
+            image_urls: allRefs,
+            num_images: 1,
+            output_format: "png",
+            enable_safety_checker: true,
+          },
+          logs: true,
+          onQueueUpdate: (u) => {
+            if (u.status === "IN_QUEUE") setSdStatus("FLUX.2 Pro in queue...");
+            else if (u.status === "IN_PROGRESS") setSdStatus("FLUX.2 Pro rendering...");
+          },
+        });
+        const imgUrl = result.data?.images?.[0]?.url;
+        if (imgUrl) {
+          setSdVideo(imgUrl);
+          setSdSource(`FLUX.2 Pro (${refUrls.length} ref photos)`);
+          setSdStatus(""); showToast("Photo ready", "success");
+          haptic([20,50,20,50,20]); setSdLoading(false); return;
+        }
+        throw new Error("No image returned");
+      } catch (e) {
+        console.log("FLUX.2 Pro failed:", e.message);
+        setSdStatus("FLUX.2 Pro failed, trying PuLID...");
+      }
+    }
+
+    // Tier 2: PuLID FLUX — best for identity-preserving generation
+    if (FAL_KEY_VAL && refPhotos.length > 0) {
+      try {
+        setSdStatus("Generating with PuLID FLUX...");
+        const refUrl = await uploadToFal(refPhotos[0].url);
+        if (!refUrl) throw new Error("Could not upload reference");
+        const prompt = `Editorial fashion photo of the person in the reference image wearing: ${pieces}. ${mood} style. Full body, soft natural lighting, minimal background, magazine quality. Preserve exact face and identity.`;
+        const result = await fal.subscribe("fal-ai/flux-pulid", {
+          input: {
+            prompt,
+            reference_image_url: refUrl,
+            image_size: "portrait_4_3",
+            num_inference_steps: 25,
+            guidance_scale: 4,
+            id_weight: 1.05,
+            num_images: 1,
+            enable_safety_checker: true,
+          },
+        });
+        const imgUrl = result.data?.images?.[0]?.url;
+        if (imgUrl) {
+          setSdVideo(imgUrl);
+          setSdSource("PuLID FLUX × fal.ai");
+          setSdStatus(""); showToast("Photo ready", "success");
+          haptic([20,50,20,50,20]); setSdLoading(false); return;
+        }
+        throw new Error("No image returned");
+      } catch (e) {
+        console.log("PuLID failed:", e.message);
+        setSdStatus("PuLID failed, trying Gemini...");
+      }
+    }
+
+    // Tier 3: Gemini — sends your face + actual wardrobe photos
     if (GEMINI_KEY) {
       try {
         setSdStatus("Generating with your face...");
@@ -987,17 +1237,48 @@ Return ONLY valid JSON, no markdown:
             </div>
 
             <div className="section">
-              <label className="profile-photo-wrap" style={{cursor:"pointer", display:"block"}}>
-                <input className="upload-input" type="file" accept="image/*" onChange={e => handleUserPhoto(e.target.files[0])}/>
-                {userPhoto ? (
-                  <img src={userPhoto.url} alt="You" className="profile-photo"/>
-                ) : (
-                  <div className="profile-placeholder">
-                    <div className="profile-placeholder-mark">{uploading ? "◌" : "+"}</div>
+              <h3 style={{fontFamily:"var(--serif)",fontSize:22,marginBottom:6,letterSpacing:"-.01em"}}>Reference photos</h3>
+              <p className="type-caption" style={{marginBottom:18,fontStyle:"italic",color:"var(--graphite)"}}>Upload 3-5 photos for the best AI results. Different angles, lighting, and expressions help preserve your identity.</p>
+
+              {/* Photo guidance */}
+              <div style={{marginBottom:16,padding:"14px 16px",background:"var(--ash-soft)",border:"0.5px solid var(--ash)",fontSize:11,fontFamily:"var(--sans)",lineHeight:1.7,color:"var(--graphite)"}}>
+                <div style={{marginBottom:6}}><span className="numeral" style={{color:"var(--ochre-deep)"}}>i.</span> Front-facing, neutral expression</div>
+                <div style={{marginBottom:6}}><span className="numeral" style={{color:"var(--ochre-deep)"}}>ii.</span> 3/4 angle, slight turn</div>
+                <div style={{marginBottom:6}}><span className="numeral" style={{color:"var(--ochre-deep)"}}>iii.</span> Different lighting or smile</div>
+                <div style={{marginBottom:6}}><span className="numeral" style={{color:"var(--ochre-deep)"}}>iv.</span> Full body if possible</div>
+                <div><span className="numeral" style={{color:"var(--ochre-deep)"}}>v.</span> Min 512×512, no sunglasses, in focus</div>
+              </div>
+
+              {/* Photo grid */}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
+                {userPhotos.map((p, i) => (
+                  <div key={p.id} style={{position:"relative",aspectRatio:"3/4",border:"0.5px solid var(--ash)",overflow:"hidden"}}>
+                    <img src={p.url} alt={`Reference ${i+1}`} style={{width:"100%",height:"100%",objectFit:"cover"}}/>
+                    <div style={{position:"absolute",top:4,left:4,background:"rgba(46,125,50,.95)",color:"white",borderRadius:"50%",width:22,height:22,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:600}}>✓</div>
+                    <button onClick={() => removeUserPhoto(p.id)} style={{position:"absolute",top:4,right:4,background:"rgba(0,0,0,.7)",color:"white",border:"none",borderRadius:"50%",width:22,height:22,cursor:"pointer",fontSize:14,lineHeight:1,padding:0}}>×</button>
+                    <div style={{position:"absolute",bottom:0,left:0,right:0,padding:"4px 6px",background:"rgba(0,0,0,.6)",color:"white",fontSize:8,fontFamily:"var(--sans)",letterSpacing:".1em",textTransform:"uppercase"}}>
+                      Photo {i+1}
+                    </div>
                   </div>
+                ))}
+                {userPhotos.length < 5 && (
+                  <label style={{cursor:"pointer",aspectRatio:"3/4",border:"0.5px dashed var(--ash)",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--ash-soft)"}}>
+                    <input type="file" accept="image/*" multiple style={{display:"none"}} onChange={e => handleUserPhotos(e.target.files)}/>
+                    <div style={{textAlign:"center",color:"var(--graphite)"}}>
+                      <div style={{fontSize:24,marginBottom:4,fontFamily:"var(--serif)",fontStyle:"italic"}}>{uploading ? "◌" : "+"}</div>
+                      <div style={{fontSize:9,fontFamily:"var(--sans)",letterSpacing:".15em",textTransform:"uppercase"}}>{uploading ? "Checking..." : "Add"}</div>
+                    </div>
+                  </label>
                 )}
-              </label>
-              <p className="text-center type-caption" style={{marginBottom:24}}>Tap to {userPhoto ? "change" : "upload"} · Used by AI for personalized videos</p>
+              </div>
+
+              {/* Status */}
+              <p className="type-caption" style={{marginBottom:24,textAlign:"center",fontStyle:"italic"}}>
+                {userPhotos.length === 0 && "No photos yet — tap + to begin"}
+                {userPhotos.length > 0 && userPhotos.length < 3 && `${userPhotos.length} of 3 minimum recommended`}
+                {userPhotos.length >= 3 && userPhotos.length < 5 && `${userPhotos.length} photos · add ${5 - userPhotos.length} more for best results`}
+                {userPhotos.length === 5 && "5 photos · maximum reached ✓"}
+              </p>
 
               <div className="stats">
                 <div className="stat">
