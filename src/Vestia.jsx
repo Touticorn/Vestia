@@ -85,6 +85,7 @@ export default function Vestia() {
   const [sdError, setSdError] = useState(null);
   const [sdStatus, setSdStatus] = useState("");
   const [sdSource, setSdSource] = useState("");
+  const [photoModel, setPhotoModel] = useState("auto"); // "auto" | "gemini" | "flux"
 
   const [selectedItem, setSelectedItem] = useState(null);
   const [toast, setToast] = useState(null);
@@ -549,7 +550,8 @@ Return ONLY valid JSON, no markdown:
     const refPhotos = userPhotos.length > 0 ? userPhotos.slice(0, 5) : (userPhoto ? [userPhoto] : []);
 
     // Tier 1: FLUX.2 [pro] edit — supports up to 9 reference images, BEST identity preservation
-    if (FAL_KEY_VAL && refPhotos.length > 0) {
+    // Skip if user selected Gemini explicitly
+    if ((photoModel === "auto" || photoModel === "flux") && FAL_KEY_VAL && refPhotos.length > 0) {
       try {
         setSdStatus("Uploading photos...");
         // Upload all reference photos + outfit items to fal storage
@@ -598,7 +600,7 @@ Return ONLY valid JSON, no markdown:
     }
 
     // Tier 2: PuLID FLUX — best for identity-preserving generation
-    if (FAL_KEY_VAL && refPhotos.length > 0) {
+    if ((photoModel === "auto" || photoModel === "flux") && FAL_KEY_VAL && refPhotos.length > 0) {
       try {
         setSdStatus("Generating with PuLID FLUX...");
         const refUrl = await uploadToFal(refPhotos[0].url);
@@ -631,7 +633,7 @@ Return ONLY valid JSON, no markdown:
     }
 
     // Tier 3: Gemini — sends your face + actual wardrobe photos
-    if (GEMINI_KEY) {
+    if ((photoModel === "auto" || photoModel === "gemini") && GEMINI_KEY) {
       try {
         setSdStatus("Generating with your face...");
         const wardrobeParts = outfitItems.slice(0, 4).map(item => ({
@@ -693,13 +695,77 @@ Return ONLY valid JSON, no markdown:
         haptic([20,50,20,50,20]); setSdLoading(false); return;
       } catch (e) {
         console.log("FLUX.2 failed:", e.message);
-        setSdError("Both Gemini and FLUX.2 unavailable. Check your API quotas.");
+        if (photoModel === "gemini") setSdError("Gemini unavailable. Try FLUX.2 or Auto.");
+        else if (photoModel === "flux") setSdError("FLUX.2 unavailable. Check fal.ai credits.");
+        else setSdError("Both Gemini and FLUX.2 unavailable. Check your API quotas.");
         showToast("Generation failed", "error");
       }
+    } else if (photoModel === "gemini") {
+      setSdError("Gemini key missing. Configure in GitHub secrets.");
+    } else if (photoModel === "flux") {
+      setSdError("fal.ai key missing or no photos uploaded.");
     } else {
       setSdError("No API available. Add fal.ai credits or wait for Gemini quota reset.");
     }
     setSdStatus(""); setSdLoading(false);
+  };
+
+  // Download photo — works in Capacitor WebView via blob conversion
+  const downloadPhoto = async (imgUrl) => {
+    try {
+      let blob;
+      if (imgUrl.startsWith("data:")) {
+        // Already base64 — convert to blob
+        const res = await fetch(imgUrl);
+        blob = await res.blob();
+      } else {
+        // Remote URL — fetch via CapacitorHttp on native to bypass CORS
+        if (window.Capacitor?.isNativePlatform?.()) {
+          const resp = await window.Capacitor.Plugins.CapacitorHttp.get({
+            url: imgUrl,
+            responseType: "blob",
+          });
+          if (resp.data) {
+            // CapacitorHttp returns base64 for blobs
+            const base64 = typeof resp.data === "string" ? resp.data : resp.data.data || "";
+            const byteString = atob(base64);
+            const bytes = new Uint8Array(byteString.length);
+            for (let i = 0; i < byteString.length; i++) bytes[i] = byteString.charCodeAt(i);
+            blob = new Blob([bytes], { type: "image/png" });
+          } else {
+            throw new Error("Empty response");
+          }
+        } else {
+          const res = await fetch(imgUrl);
+          blob = await res.blob();
+        }
+      }
+
+      // Create blob URL and trigger download
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = `vestia-${Date.now()}.png`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+      showToast("Photo downloaded", "success");
+      haptic(15);
+    } catch (e) {
+      console.error("Download failed:", e);
+      // Fallback: open in browser
+      try {
+        if (window.Capacitor?.isNativePlatform?.()) {
+          window.open(imgUrl, "_blank");
+          showToast("Opened in browser - long press to save", "info");
+        } else {
+          window.open(imgUrl, "_blank");
+        }
+      } catch (e2) {
+        showToast("Download failed: " + e.message, "error");
+      }
+    }
   };
 
   const installPWA = async () => {
@@ -978,6 +1044,32 @@ Return ONLY valid JSON, no markdown:
                       <span className="cinema-attribution">Gemini → FLUX.2</span>
                     </div>
                     <h3 className="cinema-title">A portrait,<br/><span className="type-italic">in your outfit.</span></h3>
+
+                    {/* Model selector */}
+                    <div style={{display:"flex",gap:0,marginBottom:14,border:"0.5px solid var(--graphite)"}}>
+                      {[
+                        {id:"auto",label:"Auto",sub:"Best available"},
+                        {id:"flux",label:"FLUX.2",sub:"Multi-ref · paid"},
+                        {id:"gemini",label:"Gemini",sub:"Free quota"},
+                      ].map(opt => (
+                        <button key={opt.id} onClick={() => setPhotoModel(opt.id)}
+                          style={{
+                            flex:1,
+                            padding:"10px 6px",
+                            background: photoModel===opt.id ? "var(--ochre-deep)" : "transparent",
+                            color: photoModel===opt.id ? "var(--bone)" : "var(--ochre-pale)",
+                            border:"none",
+                            borderRight: opt.id !== "gemini" ? "0.5px solid var(--graphite)" : "none",
+                            cursor:"pointer",
+                            fontFamily:"var(--sans)",
+                            transition:"all .2s",
+                          }}>
+                          <div style={{fontSize:10,letterSpacing:".18em",textTransform:"uppercase",fontWeight:500}}>{opt.label}</div>
+                          <div style={{fontSize:8,letterSpacing:".1em",textTransform:"uppercase",marginTop:2,opacity:.7}}>{opt.sub}</div>
+                        </button>
+                      ))}
+                    </div>
+
                     <button className="btn btn-block" onClick={generatePhoto} disabled={sdLoading || !userPhoto}>
                       {sdLoading ? (
                         <>
@@ -989,10 +1081,10 @@ Return ONLY valid JSON, no markdown:
                     {sdVideo && (
                       <div style={{marginTop: 16, border: "0.5px solid var(--ochre-deep)"}}>
                         <img src={sdVideo} alt="Generated outfit" style={{width: "100%", display: "block"}}/>
-                        <a href={sdVideo} download="vestia-look.png" target="_blank" rel="noopener"
-                          style={{display: "block", padding: "12px", textAlign: "center", fontFamily: "var(--sans)", fontSize: 9, letterSpacing: ".22em", textTransform: "uppercase", color: "var(--ochre-pale)", background: "var(--ink-soft)", textDecoration: "none", borderTop: "0.5px solid var(--graphite)"}}>
+                        <button onClick={() => downloadPhoto(sdVideo)}
+                          style={{display: "block", width: "100%", padding: "12px", textAlign: "center", fontFamily: "var(--sans)", fontSize: 9, letterSpacing: ".22em", textTransform: "uppercase", color: "var(--ochre-pale)", background: "var(--ink-soft)", border: "none", borderTop: "0.5px solid var(--graphite)", cursor: "pointer"}}>
                           Download Photo
-                        </a>
+                        </button>
                       </div>
                     )}
                     {sdError && <div style={{marginTop: 12, padding: "10px 14px", fontFamily: "var(--serif)", fontStyle: "italic", fontSize: 12, color: "var(--rust)", background: "rgba(160,74,46,.1)", border: "0.5px solid var(--rust)"}}>{sdError}</div>}
